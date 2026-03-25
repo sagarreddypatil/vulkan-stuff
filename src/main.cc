@@ -4,7 +4,6 @@
 #define VOLK_IMPLEMENTATION
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
-#include <glm/glm.hpp>
 #include <math.h>
 #include <volk.h>
 #include <vulkan/vulkan.h>
@@ -110,7 +109,8 @@ static void DestroyImage(VkDevice device, VkImage img, VkDeviceMemory mem, VkIma
 static void RefreshSwapchain(VkPhysicalDevice physicalDevice,
                              VkDevice device,
                              VkSurfaceKHR surface,
-                             glm::uvec2 windowSize,
+                             U32 windowSizeX,
+                             U32 windowSizeY,
                              VkSwapchainKHR& swapchain,
                              U32& imageCount,
                              VkImage (&swapchainImages)[kMaxNumSwapchainImages],
@@ -136,7 +136,7 @@ static void RefreshSwapchain(VkPhysicalDevice physicalDevice,
     VK_ASSERT(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps));
     swapchainCI.minImageCount = surfaceCaps.minImageCount;
     swapchainCI.imageExtent = surfaceCaps.currentExtent.width == 0xFFFFFFFF
-                                  ? VkExtent2D{.width = windowSize.x, .height = windowSize.y}
+                                  ? VkExtent2D{.width = windowSizeX, .height = windowSizeY}
                                   : surfaceCaps.currentExtent;
     VkSwapchainKHR oldSwapchain = swapchain;
     swapchainCI.oldSwapchain = oldSwapchain;
@@ -153,8 +153,8 @@ static void RefreshSwapchain(VkPhysicalDevice physicalDevice,
         DestroyImage(device, depthImage, depthMemory, depthView);
     CreateImage(device,
                 physicalDevice,
-                windowSize.x,
-                windowSize.y,
+                windowSizeX,
+                windowSizeY,
                 kImageFormat,
                 kMsaaSamples,
                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
@@ -164,8 +164,8 @@ static void RefreshSwapchain(VkPhysicalDevice physicalDevice,
                 msaaColorView);
     CreateImage(device,
                 physicalDevice,
-                windowSize.x,
-                windowSize.y,
+                windowSizeX,
+                windowSizeY,
                 kDepthFormat,
                 kMsaaSamples,
                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
@@ -291,11 +291,6 @@ static VkPipeline CreateGraphicsPipeline(VkDevice device,
     return pipeline;
 }
 
-static glm::uvec2 PackDevicePtr(VkDeviceAddress gp)
-{
-    return {U32(gp & U32(-1)), U32(gp >> 32)};
-}
-
 int main()
 {
     ASSERT(SDL_Init(SDL_INIT_VIDEO));
@@ -379,12 +374,13 @@ int main()
     ASSERT(window != nullptr);
     VkSurfaceKHR surface;
     ASSERT(SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface));
-    I32 windowSizeX;
-    I32 windowSizeY;
-    ASSERT(SDL_GetWindowSize(window, &windowSizeX, &windowSizeY));
-    ASSERT(windowSizeX > 0);
-    ASSERT(windowSizeY > 0);
-    glm::uvec2 windowSize(windowSizeX, windowSizeY);
+    I32 windowSizeXs;
+    I32 windowSizeYs;
+    ASSERT(SDL_GetWindowSize(window, &windowSizeXs, &windowSizeYs));
+    ASSERT(windowSizeXs > 0);
+    ASSERT(windowSizeYs > 0);
+    U32 windowSizeX = windowSizeXs;
+    U32 windowSizeY = windowSizeYs;
 
     // Orbit camera state
     float camYaw = 0.0f;
@@ -406,7 +402,8 @@ int main()
     RefreshSwapchain(physicalDevice,
                      device,
                      surface,
-                     windowSize,
+                     windowSizeX,
+                     windowSizeY,
                      swapchain,
                      imageCount,
                      swapchainImages,
@@ -475,13 +472,13 @@ int main()
     VkDeviceAddress gpScene = vkGetBufferDeviceAddress(device, &sceneBufAddressInfo);
     ASSERT(gpScene != 0);
 
-    for (U32 i = 0; i < SCENE_POINT_COUNT; i++)
+    for (U32 i = 0; i < kScenePointCount; i++)
     {
         float theta = HashF(i, 0) * 2.0f * 3.14159265f;
         float z = HashF(i, 1) * 2.0f - 1.0f;
         float r = sqrtf(1.0f - z * z);
-        gpuScene->pointPositions[i] =
-            glm::vec4(r * cosf(theta), z, r * sinf(theta), 0) * (float)SCENE_ORBIT_RADIUS;
+        Vec3 point{r * cosf(theta), z, r * sinf(theta)};
+        gpuScene->pointPositions[i] = float4(point * kSceneOrbitRadius, 0.0f);
     }
 
     // Pipeline layout
@@ -591,47 +588,46 @@ int main()
                                                   .clearValue{.depthStencil{1.0f, 0}}};
         VkRenderingInfo renderingInfo{
             .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-            .renderArea{.extent{.width = windowSize.x, .height = windowSize.y}},
+            .renderArea{.extent{.width = windowSizeX, .height = windowSizeY}},
             .layerCount = 1,
             .colorAttachmentCount = 1,
             .pColorAttachments = &colorAttachment,
             .pDepthAttachment = &depthAttachment};
         vkCmdBeginRendering(cb, &renderingInfo);
 
-        VkViewport vp{.width = float(windowSize.x),
-                      .height = float(windowSize.y),
+        VkViewport vp{.width = float(windowSizeX),
+                      .height = float(windowSizeY),
                       .minDepth = 0.0f,
                       .maxDepth = 1.0f};
-        VkRect2D scissor{.extent{.width = windowSize.x, .height = windowSize.y}};
+        VkRect2D scissor{.extent{.width = windowSizeX, .height = windowSizeY}};
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &scissor);
 
         {
             float cy = cosf(camYaw), sy = sinf(camYaw);
             float cp = cosf(camPitch), sp = sinf(camPitch);
-            glm::vec3 pos = glm::vec3(cy * cp, sp, sy * cp) * camDist;
-            glm::vec3 fwd = glm::normalize(-pos);
-            glm::vec3 right = glm::normalize(glm::cross(fwd, glm::vec3(0, 1, 0)));
-            glm::vec3 up = glm::cross(right, fwd);
-            float aspect = float(windowSize.x) / float(windowSize.y);
+            Vec3 pos{cy * cp, sp, sy * cp};
+            pos = pos * camDist;
+            Vec3 fwd = Normalize(-pos);
+            Vec3 right = Normalize(Cross(fwd, Vec3{0.0f, 1.0f, 0.0f}));
+            Vec3 up = Cross(right, fwd);
+            float aspect = float(windowSizeX) / float(windowSizeY);
             float halfTan = tanf(35.0f * 3.14159265f / 180.0f);
-            glm::mat4 view(
-                glm::vec4(right.x, up.x, -fwd.x, 0),
-                glm::vec4(right.y, up.y, -fwd.y, 0),
-                glm::vec4(right.z, up.z, -fwd.z, 0),
-                glm::vec4(-glm::dot(right, pos), -glm::dot(up, pos), glm::dot(fwd, pos), 1));
+            float4x4 view = float4x4(float4(right.x, up.x, -fwd.x, 0.0f),
+                                     float4(right.y, up.y, -fwd.y, 0.0f),
+                                     float4(right.z, up.z, -fwd.z, 0.0f),
+                                     float4(-Dot(right, pos), -Dot(up, pos), Dot(fwd, pos), 1.0f));
             float n = 0.1f, f = 100.0f;
-            glm::mat4 proj(glm::vec4(1.0f / (aspect * halfTan), 0, 0, 0),
-                           glm::vec4(0, -1.0f / halfTan, 0, 0),
-                           glm::vec4(0, 0, f / (n - f), -1),
-                           glm::vec4(0, 0, n * f / (n - f), 0));
-            PushConstants pc{.screenToWorld = glm::mat4(glm::vec4(right * aspect * halfTan, 0),
-                                                        glm::vec4(-up * halfTan, 0),
-                                                        glm::vec4(fwd, 0),
-                                                        glm::vec4(pos, 1)),
-                             .worldToScreen = proj * view,
-                             .gpScene = PackDevicePtr(gpScene),
-                             ._pad0 = glm::uvec2(0, 0)};
+            float4x4 proj = float4x4(float4(1.0f / (aspect * halfTan), 0.0f, 0.0f, 0.0f),
+                                     float4(0.0f, -1.0f / halfTan, 0.0f, 0.0f),
+                                     float4(0.0f, 0.0f, f / (n - f), -1.0f),
+                                     float4(0.0f, 0.0f, n * f / (n - f), 0.0f));
+            PushConstants pc{.screenToWorld = float4x4(float4(right * (aspect * halfTan), 0.0f),
+                                                       float4(up * -halfTan, 0.0f),
+                                                       float4(fwd, 0.0f),
+                                                       float4(pos, 1.0f)),
+                             .worldToScreen = Mul(proj, view),
+                             .gpScene = gpScene};
             vkCmdPushConstants(cb,
                                pipelineLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -644,7 +640,7 @@ int main()
         vkCmdDraw(cb, 3, 1, 0, 0);
 
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline);
-        vkCmdDraw(cb, SCENE_POINT_COUNT, 1, 0, 0);
+        vkCmdDraw(cb, kScenePointCount, 1, 0, 0);
 
         vkCmdEndRendering(cb);
 
@@ -720,15 +716,17 @@ int main()
         if (updateSwapchain)
         {
             updateSwapchain = false;
-            ASSERT(SDL_GetWindowSize(window, &windowSizeX, &windowSizeY));
-            ASSERT(windowSizeX > 0);
-            ASSERT(windowSizeY > 0);
-            windowSize = glm::uvec2(windowSizeX, windowSizeY);
+            ASSERT(SDL_GetWindowSize(window, &windowSizeXs, &windowSizeYs));
+            ASSERT(windowSizeXs > 0);
+            ASSERT(windowSizeYs > 0);
+            windowSizeX = windowSizeXs;
+            windowSizeY = windowSizeYs;
             VK_ASSERT(vkDeviceWaitIdle(device));
             RefreshSwapchain(physicalDevice,
                              device,
                              surface,
-                             windowSize,
+                             windowSizeX,
+                             windowSizeY,
                              swapchain,
                              imageCount,
                              swapchainImages,
