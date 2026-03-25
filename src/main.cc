@@ -60,17 +60,77 @@ static float HashF(U32 index, U32 channel)
     return float(h & ((1 << 24) - 1)) / float((1 << 24) - 1);
 }
 
-static void CreateImage(VkDevice device,
-                        VkPhysicalDevice physDev,
-                        U32 w,
-                        U32 h,
-                        VkFormat fmt,
-                        VkSampleCountFlagBits samples,
-                        VkImageUsageFlags usage,
-                        VkImageAspectFlags aspect,
-                        VkImage& img,
-                        VkDeviceMemory& mem,
-                        VkImageView& view)
+struct App
+{
+    VkInstance instance;
+    VkPhysicalDevice physicalDevice;
+    VkDevice device;
+    VkQueue queue;
+    U32 queueFamily;
+
+    SDL_Window* window;
+    VkSurfaceKHR surface;
+    U32 windowSizeX;
+    U32 windowSizeY;
+
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    U32 imageCount = 0;
+    VkImage swapchainImages[kMaxNumSwapchainImages];
+    VkImageView swapchainImageViews[kMaxNumSwapchainImages];
+    VkImage msaaColorImage = VK_NULL_HANDLE;
+    VkDeviceMemory msaaColorMemory = VK_NULL_HANDLE;
+    VkImageView msaaColorView = VK_NULL_HANDLE;
+    VkImage depthImage = VK_NULL_HANDLE;
+    VkDeviceMemory depthMemory = VK_NULL_HANDLE;
+    VkImageView depthView = VK_NULL_HANDLE;
+
+    VkCommandPool commandPool;
+    VkCommandBuffer cb;
+    VkFence fence;
+    VkSemaphore presentSemaphore;
+    VkSemaphore renderSemaphores[kMaxNumSwapchainImages];
+
+    VkBuffer sceneBuf;
+    VkDeviceMemory sceneMem;
+    GpuScene* gpuScene;
+    VkDeviceAddress gpScene;
+
+    VkPipelineLayout pipelineLayout;
+    VkPipeline globePipeline;
+    VkPipeline pointPipeline;
+
+    float camYaw = 0.0f;
+    float camPitch = 0.3f;
+    float camDist = 3.0f;
+    bool mouseDown = false;
+
+    void CreateImage(U32 w,
+                     U32 h,
+                     VkFormat fmt,
+                     VkSampleCountFlagBits samples,
+                     VkImageUsageFlags usage,
+                     VkImageAspectFlags aspect,
+                     VkImage& img,
+                     VkDeviceMemory& mem,
+                     VkImageView& view);
+    void DestroyImage(VkImage img, VkDeviceMemory mem, VkImageView view);
+    void RefreshSwapchain();
+    VkShaderModule LoadShaderModule(const char* shaderName, const char* stage);
+    VkPipeline CreateGraphicsPipeline(const char* shaderName, VkPrimitiveTopology topology);
+    void Init();
+    void Run();
+    void Shutdown();
+};
+
+void App::CreateImage(U32 w,
+                      U32 h,
+                      VkFormat fmt,
+                      VkSampleCountFlagBits samples,
+                      VkImageUsageFlags usage,
+                      VkImageAspectFlags aspect,
+                      VkImage& img,
+                      VkDeviceMemory& mem,
+                      VkImageView& view)
 {
     VkImageCreateInfo ci{.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
                          .imageType = VK_IMAGE_TYPE_2D,
@@ -86,8 +146,9 @@ static void CreateImage(VkDevice device,
     vkGetImageMemoryRequirements(device, img, &reqs);
     VkMemoryAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
                             .allocationSize = reqs.size,
-                            .memoryTypeIndex = FindMemoryType(
-                                physDev, reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
+                            .memoryTypeIndex = FindMemoryType(physicalDevice,
+                                                              reqs.memoryTypeBits,
+                                                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
     VK_ASSERT(vkAllocateMemory(device, &ai, nullptr, &mem));
     VK_ASSERT(vkBindImageMemory(device, img, mem, 0));
     VkImageViewCreateInfo vci{
@@ -99,28 +160,14 @@ static void CreateImage(VkDevice device,
     VK_ASSERT(vkCreateImageView(device, &vci, nullptr, &view));
 }
 
-static void DestroyImage(VkDevice device, VkImage img, VkDeviceMemory mem, VkImageView view)
+void App::DestroyImage(VkImage img, VkDeviceMemory mem, VkImageView view)
 {
     vkDestroyImageView(device, view, nullptr);
     vkDestroyImage(device, img, nullptr);
     vkFreeMemory(device, mem, nullptr);
 }
 
-static void RefreshSwapchain(VkPhysicalDevice physicalDevice,
-                             VkDevice device,
-                             VkSurfaceKHR surface,
-                             U32 windowSizeX,
-                             U32 windowSizeY,
-                             VkSwapchainKHR& swapchain,
-                             U32& imageCount,
-                             VkImage (&swapchainImages)[kMaxNumSwapchainImages],
-                             VkImageView (&swapchainImageViews)[kMaxNumSwapchainImages],
-                             VkImage& msaaColorImage,
-                             VkDeviceMemory& msaaColorMemory,
-                             VkImageView& msaaColorView,
-                             VkImage& depthImage,
-                             VkDeviceMemory& depthMemory,
-                             VkImageView& depthView)
+void App::RefreshSwapchain()
 {
     VkSwapchainCreateInfoKHR swapchainCI{.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
                                          .surface = surface,
@@ -148,12 +195,10 @@ static void RefreshSwapchain(VkPhysicalDevice physicalDevice,
         vkDestroySwapchainKHR(device, oldSwapchain, nullptr);
     }
     if (msaaColorImage != VK_NULL_HANDLE)
-        DestroyImage(device, msaaColorImage, msaaColorMemory, msaaColorView);
+        DestroyImage(msaaColorImage, msaaColorMemory, msaaColorView);
     if (depthImage != VK_NULL_HANDLE)
-        DestroyImage(device, depthImage, depthMemory, depthView);
-    CreateImage(device,
-                physicalDevice,
-                windowSizeX,
+        DestroyImage(depthImage, depthMemory, depthView);
+    CreateImage(windowSizeX,
                 windowSizeY,
                 kImageFormat,
                 kMsaaSamples,
@@ -162,9 +207,7 @@ static void RefreshSwapchain(VkPhysicalDevice physicalDevice,
                 msaaColorImage,
                 msaaColorMemory,
                 msaaColorView);
-    CreateImage(device,
-                physicalDevice,
-                windowSizeX,
+    CreateImage(windowSizeX,
                 windowSizeY,
                 kDepthFormat,
                 kMsaaSamples,
@@ -190,7 +233,7 @@ static void RefreshSwapchain(VkPhysicalDevice physicalDevice,
     }
 }
 
-static VkShaderModule LoadShaderModule(VkDevice device, const char* shaderName, const char* stage)
+VkShaderModule App::LoadShaderModule(const char* shaderName, const char* stage)
 {
     char path[256];
     int pathLen = snprintf(path, sizeof(path), "shaders/%s.%s.spv", shaderName, stage);
@@ -214,17 +257,11 @@ static VkShaderModule LoadShaderModule(VkDevice device, const char* shaderName, 
     return mod;
 }
 
-static VkPipeline CreateGraphicsPipeline(VkDevice device,
-                                         VkPipelineLayout layout,
-                                         VkFormat colorFormat,
-                                         VkFormat depthFormat,
-                                         VkSampleCountFlagBits samples,
-                                         const char* shaderName,
-                                         VkPrimitiveTopology topology)
+VkPipeline App::CreateGraphicsPipeline(const char* shaderName, VkPrimitiveTopology topology)
 {
-    VkShaderModule vertex = LoadShaderModule(device, shaderName, "vert");
+    VkShaderModule vertex = LoadShaderModule(shaderName, "vert");
     ON_SCOPE_EXIT(vkDestroyShaderModule(device, vertex, nullptr));
-    VkShaderModule fragment = LoadShaderModule(device, shaderName, "frag");
+    VkShaderModule fragment = LoadShaderModule(shaderName, "frag");
     ON_SCOPE_EXIT(vkDestroyShaderModule(device, fragment, nullptr));
     VkPipelineShaderStageCreateInfo shaderStages[2]{
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
@@ -253,7 +290,7 @@ static VkPipeline CreateGraphicsPipeline(VkDevice device,
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .lineWidth = 1.0f};
     VkPipelineMultisampleStateCreateInfo multisampleState{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = samples};
+        .rasterizationSamples = kMsaaSamples};
     VkPipelineColorBlendAttachmentState blendAttachment{
         .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
                           | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT};
@@ -266,11 +303,12 @@ static VkPipeline CreateGraphicsPipeline(VkDevice device,
         .depthTestEnable = VK_TRUE,
         .depthWriteEnable = VK_TRUE,
         .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL};
+    VkFormat colorFormat = kImageFormat;
     VkPipelineRenderingCreateInfo renderingCI{.sType =
                                                   VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
                                               .colorAttachmentCount = 1,
                                               .pColorAttachmentFormats = &colorFormat,
-                                              .depthAttachmentFormat = depthFormat};
+                                              .depthAttachmentFormat = kDepthFormat};
     VkGraphicsPipelineCreateInfo pipelineCI{.sType =
                                                 VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
                                             .pNext = &renderingCI,
@@ -284,14 +322,14 @@ static VkPipeline CreateGraphicsPipeline(VkDevice device,
                                             .pDepthStencilState = &depthStencilState,
                                             .pColorBlendState = &colorBlendState,
                                             .pDynamicState = &dynamicState,
-                                            .layout = layout};
+                                            .layout = pipelineLayout};
     VkPipeline pipeline;
     VK_ASSERT(
         vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &pipeline));
     return pipeline;
 }
 
-int main()
+void App::Init()
 {
     ASSERT(SDL_Init(SDL_INIT_VIDEO));
     ASSERT(SDL_Vulkan_LoadLibrary(nullptr));
@@ -309,7 +347,6 @@ int main()
         .enabledExtensionCount = instanceExtensionsCount,
         .ppEnabledExtensionNames = instanceExtensions,
     };
-    VkInstance instance;
     VK_ASSERT(vkCreateInstance(&instanceCI, nullptr, &instance));
     volkLoadInstance(instance);
 
@@ -319,7 +356,7 @@ int main()
     ASSERT(physicalDeviceCount <= ARRAY_COUNT(physicalDevices));
     VK_ASSERT(vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, physicalDevices));
     ASSERT(physicalDeviceCount > 0);
-    VkPhysicalDevice physicalDevice = physicalDevices[0];
+    physicalDevice = physicalDevices[0];
 
     VkPhysicalDeviceProperties2 deviceProperties{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
@@ -331,7 +368,7 @@ int main()
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, nullptr);
     ASSERT(queueFamilyCount <= ARRAY_COUNT(queueFamilies));
     vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice, &queueFamilyCount, queueFamilies);
-    U32 queueFamily = U32(-1);
+    queueFamily = U32(-1);
     for (U32 i = 0; i < queueFamilyCount; i++)
     {
         if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
@@ -363,75 +400,36 @@ int main()
                                 .pQueueCreateInfos = &queueCI,
                                 .enabledExtensionCount = ARRAY_COUNT(deviceExtensions),
                                 .ppEnabledExtensionNames = deviceExtensions};
-    VkDevice device;
     VK_ASSERT(vkCreateDevice(physicalDevice, &deviceCI, nullptr, &device));
-    VkQueue queue;
     vkGetDeviceQueue(device, queueFamily, 0, &queue);
 
     // Window
-    SDL_Window* window =
-        SDL_CreateWindow("Triangle", 1280U, 720U, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    window = SDL_CreateWindow("Triangle", 1280U, 720U, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     ASSERT(window != nullptr);
-    VkSurfaceKHR surface;
     ASSERT(SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface));
     I32 windowSizeXs;
     I32 windowSizeYs;
     ASSERT(SDL_GetWindowSize(window, &windowSizeXs, &windowSizeYs));
     ASSERT(windowSizeXs > 0);
     ASSERT(windowSizeYs > 0);
-    U32 windowSizeX = windowSizeXs;
-    U32 windowSizeY = windowSizeYs;
-
-    // Orbit camera state
-    float camYaw = 0.0f;
-    float camPitch = 0.3f;
-    float camDist = 3.0f;
-    bool mouseDown = false;
+    windowSizeX = windowSizeXs;
+    windowSizeY = windowSizeYs;
 
     // Swapchain
-    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
-    U32 imageCount = 0;
-    VkImage swapchainImages[kMaxNumSwapchainImages];
-    VkImageView swapchainImageViews[kMaxNumSwapchainImages];
-    VkImage msaaColorImage = VK_NULL_HANDLE;
-    VkImage depthImage = VK_NULL_HANDLE;
-    VkDeviceMemory msaaColorMemory = VK_NULL_HANDLE;
-    VkDeviceMemory depthMemory = VK_NULL_HANDLE;
-    VkImageView msaaColorView = VK_NULL_HANDLE;
-    VkImageView depthView = VK_NULL_HANDLE;
-    RefreshSwapchain(physicalDevice,
-                     device,
-                     surface,
-                     windowSizeX,
-                     windowSizeY,
-                     swapchain,
-                     imageCount,
-                     swapchainImages,
-                     swapchainImageViews,
-                     msaaColorImage,
-                     msaaColorMemory,
-                     msaaColorView,
-                     depthImage,
-                     depthMemory,
-                     depthView);
+    RefreshSwapchain();
 
     // Command pool + buffers
     VkCommandPoolCreateInfo commandPoolCI{.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                           .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
                                           .queueFamilyIndex = queueFamily};
-    VkCommandPool commandPool;
     VK_ASSERT(vkCreateCommandPool(device, &commandPoolCI, nullptr, &commandPool));
 
-    VkCommandBuffer cb;
     VkCommandBufferAllocateInfo cbAllocCI{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
                                           .commandPool = commandPool,
                                           .commandBufferCount = 1};
     VK_ASSERT(vkAllocateCommandBuffers(device, &cbAllocCI, &cb));
 
     // Sync objects
-    VkFence fence;
-    VkSemaphore presentSemaphore;
-    VkSemaphore renderSemaphores[ARRAY_COUNT(swapchainImages)]; // one per swapchain image
     VkFenceCreateInfo fenceCI{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
                               .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     VkSemaphoreCreateInfo semaphoreCI{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -441,8 +439,6 @@ int main()
         VK_ASSERT(vkCreateSemaphore(device, &semaphoreCI, nullptr, &renderSemaphores[i]));
 
     // Scene buffer
-    VkBuffer sceneBuf;
-    VkDeviceMemory sceneMem;
     {
         VkBufferCreateInfo bufCI{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                  .size = sizeof(GpuScene),
@@ -465,11 +461,10 @@ int main()
         VK_ASSERT(vkAllocateMemory(device, &memAI, nullptr, &sceneMem));
         VK_ASSERT(vkBindBufferMemory(device, sceneBuf, sceneMem, 0));
     }
-    GpuScene* gpuScene;
     VK_ASSERT(vkMapMemory(device, sceneMem, 0, sizeof(GpuScene), 0, (void**)&gpuScene));
     VkBufferDeviceAddressInfo sceneBufAddressInfo{
         .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = sceneBuf};
-    VkDeviceAddress gpScene = vkGetBufferDeviceAddress(device, &sceneBufAddressInfo);
+    gpScene = vkGetBufferDeviceAddress(device, &sceneBufAddressInfo);
     ASSERT(gpScene != 0);
 
     for (U32 i = 0; i < kScenePointCount; i++)
@@ -490,24 +485,13 @@ int main()
                                                     VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
                                                 .pushConstantRangeCount = 1,
                                                 .pPushConstantRanges = &pushRange};
-    VkPipelineLayout pipelineLayout;
     VK_ASSERT(vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout));
-    VkPipeline globePipeline = CreateGraphicsPipeline(device,
-                                                      pipelineLayout,
-                                                      kImageFormat,
-                                                      kDepthFormat,
-                                                      kMsaaSamples,
-                                                      "globe",
-                                                      VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-    VkPipeline pointPipeline = CreateGraphicsPipeline(device,
-                                                      pipelineLayout,
-                                                      kImageFormat,
-                                                      kDepthFormat,
-                                                      kMsaaSamples,
-                                                      "point",
-                                                      VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+    globePipeline = CreateGraphicsPipeline("globe", VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+    pointPipeline = CreateGraphicsPipeline("point", VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+}
 
-    // Render loop
+void App::Run()
+{
     U32 imageIndex = 0;
     bool quit = false;
     bool updateSwapchain = false;
@@ -716,31 +700,21 @@ int main()
         if (updateSwapchain)
         {
             updateSwapchain = false;
+            I32 windowSizeXs;
+            I32 windowSizeYs;
             ASSERT(SDL_GetWindowSize(window, &windowSizeXs, &windowSizeYs));
             ASSERT(windowSizeXs > 0);
             ASSERT(windowSizeYs > 0);
             windowSizeX = windowSizeXs;
             windowSizeY = windowSizeYs;
             VK_ASSERT(vkDeviceWaitIdle(device));
-            RefreshSwapchain(physicalDevice,
-                             device,
-                             surface,
-                             windowSizeX,
-                             windowSizeY,
-                             swapchain,
-                             imageCount,
-                             swapchainImages,
-                             swapchainImageViews,
-                             msaaColorImage,
-                             msaaColorMemory,
-                             msaaColorView,
-                             depthImage,
-                             depthMemory,
-                             depthView);
+            RefreshSwapchain();
         }
     }
+}
 
-    // Teardown
+void App::Shutdown()
+{
     VK_ASSERT(vkDeviceWaitIdle(device));
     vkDestroyPipeline(device, globePipeline, nullptr);
     vkDestroyPipeline(device, pointPipeline, nullptr);
@@ -752,8 +726,8 @@ int main()
         vkDestroySemaphore(device, renderSemaphores[i], nullptr);
         vkDestroyImageView(device, swapchainImageViews[i], nullptr);
     }
-    DestroyImage(device, msaaColorImage, msaaColorMemory, msaaColorView);
-    DestroyImage(device, depthImage, depthMemory, depthView);
+    DestroyImage(msaaColorImage, msaaColorMemory, msaaColorView);
+    DestroyImage(depthImage, depthMemory, depthView);
     vkDestroyBuffer(device, sceneBuf, nullptr);
     vkUnmapMemory(device, sceneMem);
     vkFreeMemory(device, sceneMem, nullptr);
@@ -764,4 +738,12 @@ int main()
     vkDestroyInstance(instance, nullptr);
     SDL_DestroyWindow(window);
     SDL_Quit();
+}
+
+int main()
+{
+    App app{};
+    app.Init();
+    app.Run();
+    app.Shutdown();
 }
