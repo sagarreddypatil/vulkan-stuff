@@ -40,7 +40,78 @@ static U32* ReadShader(const char* path, U64& outSize)
     return buf;
 }
 
+static U32 FindMemoryType(VkPhysicalDevice physDev, U32 typeFilter, VkMemoryPropertyFlags props)
+{
+    VkPhysicalDeviceMemoryProperties memProps;
+    vkGetPhysicalDeviceMemoryProperties(physDev, &memProps);
+    for (U32 i = 0; i < memProps.memoryTypeCount; i++)
+        if ((typeFilter & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & props) == props)
+            return i;
+    LOG_FATAL("Failed to find suitable memory type");
+    return 0;
+}
+
+static U32 Xorshift32(U32& state)
+{
+    state ^= state << 13;
+    state ^= state >> 17;
+    state ^= state << 5;
+    return state;
+}
+
+static float RandF(U32& rng)
+{
+    return float(Xorshift32(rng)) / float(0xFFFFFFFFu);
+}
+
+static void CreateImage(VkDevice device,
+                        VkPhysicalDevice physDev,
+                        U32 w,
+                        U32 h,
+                        VkFormat fmt,
+                        VkSampleCountFlagBits samples,
+                        VkImageUsageFlags usage,
+                        VkImageAspectFlags aspect,
+                        VkImage& img,
+                        VkDeviceMemory& mem,
+                        VkImageView& view)
+{
+    VkImageCreateInfo ci{.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                         .imageType = VK_IMAGE_TYPE_2D,
+                         .format = fmt,
+                         .extent = {w, h, 1},
+                         .mipLevels = 1,
+                         .arrayLayers = 1,
+                         .samples = samples,
+                         .tiling = VK_IMAGE_TILING_OPTIMAL,
+                         .usage = usage};
+    VK_ASSERT(vkCreateImage(device, &ci, nullptr, &img));
+    VkMemoryRequirements reqs;
+    vkGetImageMemoryRequirements(device, img, &reqs);
+    VkMemoryAllocateInfo ai{.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                            .allocationSize = reqs.size,
+                            .memoryTypeIndex = FindMemoryType(
+                                physDev, reqs.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)};
+    VK_ASSERT(vkAllocateMemory(device, &ai, nullptr, &mem));
+    VK_ASSERT(vkBindImageMemory(device, img, mem, 0));
+    VkImageViewCreateInfo vci{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+        .image = img,
+        .viewType = VK_IMAGE_VIEW_TYPE_2D,
+        .format = fmt,
+        .subresourceRange = {.aspectMask = aspect, .levelCount = 1, .layerCount = 1}};
+    VK_ASSERT(vkCreateImageView(device, &vci, nullptr, &view));
+}
+
+static void DestroyImage(VkDevice device, VkImage img, VkDeviceMemory mem, VkImageView view)
+{
+    vkDestroyImageView(device, view, nullptr);
+    vkDestroyImage(device, img, nullptr);
+    vkFreeMemory(device, mem, nullptr);
+}
+
 static constexpr U32 kMaxFramesInFlight = 2;
+static constexpr VkSampleCountFlagBits kMsaaSamples = VK_SAMPLE_COUNT_32_BIT;
 
 int main()
 {
@@ -146,6 +217,7 @@ int main()
 
     // Swapchain
     constexpr VkFormat kImageFormat = VK_FORMAT_B8G8R8A8_SRGB;
+    constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
     VkSwapchainCreateInfoKHR swapchainCI{.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
                                          .surface = surface,
                                          .minImageCount = surfaceCaps.minImageCount,
@@ -178,6 +250,33 @@ int main()
         VK_ASSERT(vkCreateImageView(device, &viewCI, nullptr, &swapchainImageViews[i]));
     }
 
+    // MSAA color + depth images
+    VkImage msaaColorImage, depthImage;
+    VkDeviceMemory msaaColorMemory, depthMemory;
+    VkImageView msaaColorView, depthView;
+    CreateImage(device,
+                physicalDevice,
+                (U32)windowSize.x,
+                (U32)windowSize.y,
+                kImageFormat,
+                kMsaaSamples,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                msaaColorImage,
+                msaaColorMemory,
+                msaaColorView);
+    CreateImage(device,
+                physicalDevice,
+                (U32)windowSize.x,
+                (U32)windowSize.y,
+                kDepthFormat,
+                kMsaaSamples,
+                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                VK_IMAGE_ASPECT_DEPTH_BIT,
+                depthImage,
+                depthMemory,
+                depthView);
+
     // Command pool + buffers
     VkCommandPoolCreateInfo commandPoolCI{.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
                                           .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
@@ -206,42 +305,109 @@ int main()
     for (U32 i = 0; i < imageCount; i++)
         VK_ASSERT(vkCreateSemaphore(device, &semaphoreCI, nullptr, &renderSemaphores[i]));
 
-    // Pipeline
-    U64 vertSize;
-    U64 fragSize;
-    U32* vertSpirv = ReadShader("shaders/tri.vert.spv", vertSize);
-    U32* fragSpirv = ReadShader("shaders/tri.frag.spv", fragSize);
-    VkShaderModule vertModule, fragModule;
-    VkShaderModuleCreateInfo vertModuleCI{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-                                          .codeSize = vertSize,
-                                          .pCode = vertSpirv};
-    VkShaderModuleCreateInfo fragModuleCI{.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-                                          .codeSize = fragSize,
-                                          .pCode = fragSpirv};
-    VK_ASSERT(vkCreateShaderModule(device, &vertModuleCI, nullptr, &vertModule));
-    VK_ASSERT(vkCreateShaderModule(device, &fragModuleCI, nullptr, &fragModule));
-    delete[] vertSpirv;
-    delete[] fragSpirv;
+    // Scene buffer
+    VkBuffer sceneBuf;
+    VkDeviceMemory sceneMem;
+    {
+        VkBufferCreateInfo bufCI{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                 .size = sizeof(SceneData),
+                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+        VK_ASSERT(vkCreateBuffer(device, &bufCI, nullptr, &sceneBuf));
 
-    VkPushConstantRange pushRange{
-        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = 0, .size = sizeof(PushConstants)};
+        VkMemoryRequirements memReqs;
+        vkGetBufferMemoryRequirements(device, sceneBuf, &memReqs);
+        VkMemoryAllocateInfo memAI{.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                   .allocationSize = memReqs.size,
+                                   .memoryTypeIndex =
+                                       FindMemoryType(physicalDevice,
+                                                      memReqs.memoryTypeBits,
+                                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                                                          | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
+        VK_ASSERT(vkAllocateMemory(device, &memAI, nullptr, &sceneMem));
+        VK_ASSERT(vkBindBufferMemory(device, sceneBuf, sceneMem, 0));
+
+        SceneData* mapped;
+        VK_ASSERT(vkMapMemory(device, sceneMem, 0, sizeof(SceneData), 0, (void**)&mapped));
+        U32 rng = 0xDEADBEEF;
+        for (U32 i = 0; i < SCENE_POINT_COUNT; i++)
+        {
+            float theta = RandF(rng) * 2.0f * 3.14159265f;
+            float z = RandF(rng) * 2.0f - 1.0f;
+            float r = sqrtf(1.0f - z * z);
+            mapped->pointPositions[i] =
+                glm::vec4(r * cosf(theta), z, r * sinf(theta), 0) * (float)SCENE_ORBIT_RADIUS;
+        }
+        vkUnmapMemory(device, sceneMem);
+    }
+
+    VkDescriptorSetLayoutBinding dslBinding{.binding = 0,
+                                            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                            .descriptorCount = 1,
+                                            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT
+                                                          | VK_SHADER_STAGE_FRAGMENT_BIT};
+    VkDescriptorSetLayoutCreateInfo dslCI{.sType =
+                                              VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                          .bindingCount = 1,
+                                          .pBindings = &dslBinding};
+    VkDescriptorSetLayout descSetLayout;
+    VK_ASSERT(vkCreateDescriptorSetLayout(device, &dslCI, nullptr, &descSetLayout));
+
+    VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1};
+    VkDescriptorPoolCreateInfo dpCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+                                    .maxSets = 1,
+                                    .poolSizeCount = 1,
+                                    .pPoolSizes = &poolSize};
+    VkDescriptorPool descPool;
+    VK_ASSERT(vkCreateDescriptorPool(device, &dpCI, nullptr, &descPool));
+
+    VkDescriptorSetAllocateInfo dsAI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                                     .descriptorPool = descPool,
+                                     .descriptorSetCount = 1,
+                                     .pSetLayouts = &descSetLayout};
+    VkDescriptorSet descSet;
+    VK_ASSERT(vkAllocateDescriptorSets(device, &dsAI, &descSet));
+
+    VkDescriptorBufferInfo descBufInfo{.buffer = sceneBuf, .offset = 0, .range = sizeof(SceneData)};
+    VkWriteDescriptorSet descWrite{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                                   .dstSet = descSet,
+                                   .dstBinding = 0,
+                                   .descriptorCount = 1,
+                                   .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                   .pBufferInfo = &descBufInfo};
+    vkUpdateDescriptorSets(device, 1, &descWrite, 0, nullptr);
+
+    // Shader modules
+    auto LoadModule = [&](const char* path)
+    {
+        U64 size;
+        U32* spirv = ReadShader(path, size);
+        VkShaderModuleCreateInfo ci{
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = size, .pCode = spirv};
+        VkShaderModule mod;
+        VK_ASSERT(vkCreateShaderModule(device, &ci, nullptr, &mod));
+        delete[] spirv;
+        return mod;
+    };
+    VkShaderModule globeVert = LoadModule("shaders/globe.vert.spv");
+    VkShaderModule globeFrag = LoadModule("shaders/globe.frag.spv");
+    VkShaderModule pointVert = LoadModule("shaders/point.vert.spv");
+    VkShaderModule pointFrag = LoadModule("shaders/point.frag.spv");
+
+    // Pipeline layout
+    VkPushConstantRange pushRange{.stageFlags =
+                                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                  .offset = 0,
+                                  .size = sizeof(PushConstants)};
     VkPipelineLayoutCreateInfo pipelineLayoutCI{.sType =
                                                     VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                                .setLayoutCount = 1,
+                                                .pSetLayouts = &descSetLayout,
                                                 .pushConstantRangeCount = 1,
                                                 .pPushConstantRanges = &pushRange};
     VkPipelineLayout pipelineLayout;
     VK_ASSERT(vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout));
 
-    VkPipelineShaderStageCreateInfo shaderStages[2]{
-        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-         .stage = VK_SHADER_STAGE_VERTEX_BIT,
-         .module = vertModule,
-         .pName = "main"},
-        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-         .module = fragModule,
-         .pName = "main"},
-    };
+    // Shared pipeline state
     VkPipelineVertexInputStateCreateInfo vertexInputState{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo inputAssemblyState{
@@ -260,35 +426,73 @@ int main()
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .lineWidth = 1.0f};
     VkPipelineMultisampleStateCreateInfo multisampleState{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+        .rasterizationSamples = kMsaaSamples};
     VkPipelineColorBlendAttachmentState blendAttachment{.colorWriteMask = 0xF};
     VkPipelineColorBlendStateCreateInfo colorBlendState{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .attachmentCount = 1,
         .pAttachments = &blendAttachment};
+    VkPipelineDepthStencilStateCreateInfo depthStencilState{
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
+        .depthTestEnable = VK_TRUE,
+        .depthWriteEnable = VK_TRUE,
+        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL};
     VkPipelineRenderingCreateInfo renderingCI{.sType =
                                                   VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
                                               .colorAttachmentCount = 1,
-                                              .pColorAttachmentFormats = &kImageFormat};
+                                              .pColorAttachmentFormats = &kImageFormat,
+                                              .depthAttachmentFormat = kDepthFormat};
+
+    // Globe pipeline (triangle list, fullscreen quad ray trace)
+    VkPipelineShaderStageCreateInfo globeStages[2]{
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = globeVert,
+         .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = globeFrag,
+         .pName = "main"},
+    };
     VkGraphicsPipelineCreateInfo pipelineCI{.sType =
                                                 VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
                                             .pNext = &renderingCI,
-                                            .stageCount = ARRAY_COUNT(shaderStages),
-                                            .pStages = shaderStages,
+                                            .stageCount = 2,
+                                            .pStages = globeStages,
                                             .pVertexInputState = &vertexInputState,
                                             .pInputAssemblyState = &inputAssemblyState,
                                             .pViewportState = &viewportState,
                                             .pRasterizationState = &rasterizationState,
                                             .pMultisampleState = &multisampleState,
+                                            .pDepthStencilState = &depthStencilState,
                                             .pColorBlendState = &colorBlendState,
                                             .pDynamicState = &dynamicState,
                                             .layout = pipelineLayout};
-    VkPipeline pipeline;
+    VkPipeline globePipeline;
     VK_ASSERT(
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &pipeline));
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &globePipeline));
 
-    vkDestroyShaderModule(device, vertModule, nullptr);
-    vkDestroyShaderModule(device, fragModule, nullptr);
+    // Point pipeline (point list)
+    VkPipelineShaderStageCreateInfo pointStages[2]{
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = pointVert,
+         .pName = "main"},
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = pointFrag,
+         .pName = "main"},
+    };
+    inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+    pipelineCI.pStages = pointStages;
+    VkPipeline pointPipeline;
+    VK_ASSERT(
+        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &pointPipeline));
+
+    vkDestroyShaderModule(device, globeVert, nullptr);
+    vkDestroyShaderModule(device, globeFrag, nullptr);
+    vkDestroyShaderModule(device, pointVert, nullptr);
+    vkDestroyShaderModule(device, pointFrag, nullptr);
 
     // Render loop
     U32 frameIndex = 0;
@@ -317,36 +521,71 @@ int main()
                                       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
         VK_ASSERT(vkBeginCommandBuffer(cb, &cbBI));
 
-        VkImageMemoryBarrier2 barrierColor{
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .srcAccessMask = 0,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .dstAccessMask =
-                VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
-            .image = swapchainImages[imageIndex],
-            .subresourceRange{
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1}};
-        VkDependencyInfo barrierColorDep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                                         .imageMemoryBarrierCount = 1,
-                                         .pImageMemoryBarriers = &barrierColor};
-        vkCmdPipelineBarrier2(cb, &barrierColorDep);
+        VkImageMemoryBarrier2 barriers[3]{
+            {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+             .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+             .srcAccessMask = 0,
+             .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+             .dstAccessMask =
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+             .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+             .newLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+             .image = swapchainImages[imageIndex],
+             .subresourceRange{
+                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1}},
+            {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+             .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+             .srcAccessMask = 0,
+             .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+             .dstAccessMask =
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+             .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+             .newLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+             .image = msaaColorImage,
+             .subresourceRange{
+                 .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1}},
+            {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+             .srcStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT
+                             | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+             .srcAccessMask = 0,
+             .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT
+                             | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+             .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                              | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+             .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+             .newLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+             .image = depthImage,
+             .subresourceRange{
+                 .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1}}};
+        VkDependencyInfo depInfo{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                                 .imageMemoryBarrierCount = 3,
+                                 .pImageMemoryBarriers = barriers};
+        vkCmdPipelineBarrier2(cb, &depInfo);
 
-        VkRenderingAttachmentInfo colorAttachment{.sType =
+        VkRenderingAttachmentInfo colorAttachment{
+            .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+            .imageView = msaaColorView,
+            .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+            .resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT,
+            .resolveImageView = swapchainImageViews[imageIndex],
+            .resolveImageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+            .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+            .clearValue{.color{0.0f, 0.0f, 0.0f, 1.0f}}};
+        VkRenderingAttachmentInfo depthAttachment{.sType =
                                                       VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-                                                  .imageView = swapchainImageViews[imageIndex],
+                                                  .imageView = depthView,
                                                   .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
                                                   .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-                                                  .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-                                                  .clearValue{.color{0.0f, 0.0f, 0.0f, 1.0f}}};
+                                                  .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                                  .clearValue{.depthStencil{1.0f, 0}}};
         VkRenderingInfo renderingInfo{
             .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
             .renderArea{.extent{.width = (U32)windowSize.x, .height = (U32)windowSize.y}},
             .layerCount = 1,
             .colorAttachmentCount = 1,
-            .pColorAttachments = &colorAttachment};
+            .pColorAttachments = &colorAttachment,
+            .pDepthAttachment = &depthAttachment};
         vkCmdBeginRendering(cb, &renderingInfo);
 
         VkViewport vp{.width = float(windowSize.x),
@@ -356,7 +595,8 @@ int main()
         VkRect2D scissor{.extent{.width = (U32)windowSize.x, .height = (U32)windowSize.y}};
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &scissor);
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindDescriptorSets(
+            cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descSet, 0, nullptr);
 
         {
             float cy = cosf(camYaw), sy = sinf(camYaw);
@@ -367,14 +607,34 @@ int main()
             glm::vec3 up = glm::cross(right, fwd);
             float aspect = float(windowSize.x) / float(windowSize.y);
             float halfTan = tanf(35.0f * 3.14159265f / 180.0f);
+            glm::mat4 view(
+                glm::vec4(right.x, up.x, -fwd.x, 0),
+                glm::vec4(right.y, up.y, -fwd.y, 0),
+                glm::vec4(right.z, up.z, -fwd.z, 0),
+                glm::vec4(-glm::dot(right, pos), -glm::dot(up, pos), glm::dot(fwd, pos), 1));
+            float n = 0.1f, f = 100.0f;
+            glm::mat4 proj(glm::vec4(1.0f / (aspect * halfTan), 0, 0, 0),
+                           glm::vec4(0, -1.0f / halfTan, 0, 0),
+                           glm::vec4(0, 0, f / (n - f), -1),
+                           glm::vec4(0, 0, n * f / (n - f), 0));
             PushConstants pc{.screenToWorld = glm::mat4(glm::vec4(right * aspect * halfTan, 0),
                                                         glm::vec4(up * halfTan, 0),
                                                         glm::vec4(fwd, 0),
-                                                        glm::vec4(pos, 1))};
-            vkCmdPushConstants(
-                cb, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+                                                        glm::vec4(pos, 1)),
+                             .worldToScreen = proj * view};
+            vkCmdPushConstants(cb,
+                               pipelineLayout,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0,
+                               sizeof(pc),
+                               &pc);
         }
+
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, globePipeline);
         vkCmdDraw(cb, 3, 1, 0, 0);
+
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline);
+        vkCmdDraw(cb, SCENE_POINT_COUNT, 1, 0, 0);
 
         vkCmdEndRendering(cb);
 
@@ -434,7 +694,7 @@ int main()
             if (event.type == SDL_EVENT_MOUSE_MOTION && mouseDown)
             {
                 camYaw += event.motion.xrel * 0.005f;
-                camPitch -= event.motion.yrel * 0.005f;
+                camPitch += event.motion.yrel * 0.005f;
                 float limit = 1.55f;
                 if (camPitch > limit)
                     camPitch = limit;
@@ -461,6 +721,30 @@ int main()
             swapchainCI.oldSwapchain = swapchain;
             swapchainCI.imageExtent = {.width = (U32)windowSize.x, .height = (U32)windowSize.y};
             VK_ASSERT(vkCreateSwapchainKHR(device, &swapchainCI, nullptr, &swapchain));
+            DestroyImage(device, msaaColorImage, msaaColorMemory, msaaColorView);
+            DestroyImage(device, depthImage, depthMemory, depthView);
+            CreateImage(device,
+                        physicalDevice,
+                        (U32)windowSize.x,
+                        (U32)windowSize.y,
+                        kImageFormat,
+                        kMsaaSamples,
+                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                        VK_IMAGE_ASPECT_COLOR_BIT,
+                        msaaColorImage,
+                        msaaColorMemory,
+                        msaaColorView);
+            CreateImage(device,
+                        physicalDevice,
+                        (U32)windowSize.x,
+                        (U32)windowSize.y,
+                        kDepthFormat,
+                        kMsaaSamples,
+                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                        VK_IMAGE_ASPECT_DEPTH_BIT,
+                        depthImage,
+                        depthMemory,
+                        depthView);
             for (U32 i = 0; i < imageCount; i++)
                 vkDestroyImageView(device, swapchainImageViews[i], nullptr);
             vkDestroySwapchainKHR(device, swapchainCI.oldSwapchain, nullptr);
@@ -483,7 +767,8 @@ int main()
 
     // Teardown
     VK_ASSERT(vkDeviceWaitIdle(device));
-    vkDestroyPipeline(device, pipeline, nullptr);
+    vkDestroyPipeline(device, globePipeline, nullptr);
+    vkDestroyPipeline(device, pointPipeline, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     for (U32 i = 0; i < kMaxFramesInFlight; i++)
     {
@@ -495,6 +780,12 @@ int main()
         vkDestroySemaphore(device, renderSemaphores[i], nullptr);
         vkDestroyImageView(device, swapchainImageViews[i], nullptr);
     }
+    DestroyImage(device, msaaColorImage, msaaColorMemory, msaaColorView);
+    DestroyImage(device, depthImage, depthMemory, depthView);
+    vkDestroyBuffer(device, sceneBuf, nullptr);
+    vkFreeMemory(device, sceneMem, nullptr);
+    vkDestroyDescriptorPool(device, descPool, nullptr);
+    vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);
     vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroySwapchainKHR(device, swapchain, nullptr);
     vkDestroySurfaceKHR(instance, surface, nullptr);
