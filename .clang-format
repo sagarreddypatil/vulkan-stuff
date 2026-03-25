@@ -1,0 +1,46 @@
+BasedOnStyle: Microsoft
+ColumnLimit: 100
+
+IndentWidth: 4
+ContinuationIndentWidth: 4
+NamespaceIndentation: None
+IndentCaseLabels: true
+IndentPPDirectives: BeforeHash
+
+BreakBeforeBraces: Allman
+
+AlignAfterOpenBracket: Align
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignOperands: true
+AlignTrailingComments: true
+
+SpaceAfterCStyleCast: false
+SpaceBeforeParens: ControlStatements
+SpaceInEmptyParentheses: false
+SpacesInAngles: Never
+SpacesInContainerLiterals: false
+SpacesInParentheses: false
+SpacesInSquareBrackets: false
+
+SortIncludes: CaseSensitive
+IncludeBlocks: Regroup
+
+AllowShortBlocksOnASingleLine: Empty
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+BinPackArguments: false
+BinPackParameters: false
+BreakBeforeBinaryOperators: NonAssignment
+BreakBeforeTernaryOperators: true
+BreakConstructorInitializers: BeforeColon
+BreakInheritanceList: BeforeColon
+BreakTemplateDeclarations: Yes
+
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+Standard: c++17
+Cpp11BracedListStyle: true
