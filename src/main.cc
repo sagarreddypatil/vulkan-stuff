@@ -711,11 +711,9 @@ int main()
             }
             if (event.type == SDL_EVENT_MOUSE_WHEEL)
             {
-                camDist -= event.wheel.y * 0.3f;
-                if (camDist < 1.5f)
-                    camDist = 1.5f;
-                if (camDist > 20.0f)
-                    camDist = 20.0f;
+                camDist -= event.wheel.y * 0.1f;
+                camDist = Max(camDist, 1.1f);
+                camDist = Min(camDist, 10.0f);
             }
         }
 
