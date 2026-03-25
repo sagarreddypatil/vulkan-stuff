@@ -124,6 +124,11 @@ static VkShaderModule LoadModule(VkDevice device, const char* const path)
     return mod;
 }
 
+static glm::uvec2 PackDevicePtr(VkDeviceAddress gp)
+{
+    return {U32(gp & U32(-1)), U32(gp >> 32)};
+}
+
 static constexpr U32 kMaxFramesInFlight = 2;
 static constexpr VkSampleCountFlagBits kMsaaSamples = VK_SAMPLE_COUNT_32_BIT;
 
@@ -186,10 +191,6 @@ int main()
                                     .pQueuePriorities = &qfPrios};
     VkPhysicalDeviceVulkan12Features enabledVk12Features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-        .descriptorIndexing = true,
-        .shaderSampledImageArrayNonUniformIndexing = true,
-        .descriptorBindingVariableDescriptorCount = true,
-        .runtimeDescriptorArray = true,
         .bufferDeviceAddress = true};
     VkPhysicalDeviceVulkan13Features enabledVk13Features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
@@ -327,12 +328,16 @@ int main()
     {
         VkBufferCreateInfo bufCI{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                  .size = sizeof(GpuScene),
-                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
+                                 .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                          | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
         VK_ASSERT(vkCreateBuffer(device, &bufCI, nullptr, &sceneBuf));
 
         VkMemoryRequirements memReqs;
         vkGetBufferMemoryRequirements(device, sceneBuf, &memReqs);
+        VkMemoryAllocateFlagsInfo allocFlags{.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO,
+                                             .flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT};
         VkMemoryAllocateInfo memAI{.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                   .pNext = &allocFlags,
                                    .allocationSize = memReqs.size,
                                    .memoryTypeIndex =
                                        FindMemoryType(physicalDevice,
@@ -352,42 +357,10 @@ int main()
         gpuScene->pointPositions[i] =
             glm::vec4(r * cosf(theta), z, r * sinf(theta), 0) * (float)SCENE_ORBIT_RADIUS;
     }
-
-    VkDescriptorSetLayoutBinding dslBinding{.binding = 0,
-                                            .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                            .descriptorCount = 1,
-                                            .stageFlags = VK_SHADER_STAGE_VERTEX_BIT
-                                                          | VK_SHADER_STAGE_FRAGMENT_BIT};
-    VkDescriptorSetLayoutCreateInfo dslCI{.sType =
-                                              VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-                                          .bindingCount = 1,
-                                          .pBindings = &dslBinding};
-    VkDescriptorSetLayout descSetLayout;
-    VK_ASSERT(vkCreateDescriptorSetLayout(device, &dslCI, nullptr, &descSetLayout));
-
-    VkDescriptorPoolSize poolSize{.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .descriptorCount = 1};
-    VkDescriptorPoolCreateInfo dpCI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
-                                    .maxSets = 1,
-                                    .poolSizeCount = 1,
-                                    .pPoolSizes = &poolSize};
-    VkDescriptorPool descPool;
-    VK_ASSERT(vkCreateDescriptorPool(device, &dpCI, nullptr, &descPool));
-
-    VkDescriptorSetAllocateInfo dsAI{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                                     .descriptorPool = descPool,
-                                     .descriptorSetCount = 1,
-                                     .pSetLayouts = &descSetLayout};
-    VkDescriptorSet descSet;
-    VK_ASSERT(vkAllocateDescriptorSets(device, &dsAI, &descSet));
-
-    VkDescriptorBufferInfo descBufInfo{.buffer = sceneBuf, .offset = 0, .range = sizeof(GpuScene)};
-    VkWriteDescriptorSet descWrite{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                                   .dstSet = descSet,
-                                   .dstBinding = 0,
-                                   .descriptorCount = 1,
-                                   .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                   .pBufferInfo = &descBufInfo};
-    vkUpdateDescriptorSets(device, 1, &descWrite, 0, nullptr);
+    VkBufferDeviceAddressInfo sceneBufAddressInfo{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = sceneBuf};
+    VkDeviceAddress gpScene = vkGetBufferDeviceAddress(device, &sceneBufAddressInfo);
+    ASSERT(gpScene != 0);
 
     VkShaderModule globeVert = LoadModule(device, "shaders/globe.vert.spv");
     VkShaderModule globeFrag = LoadModule(device, "shaders/globe.frag.spv");
@@ -401,8 +374,6 @@ int main()
                                   .size = sizeof(PushConstants)};
     VkPipelineLayoutCreateInfo pipelineLayoutCI{.sType =
                                                     VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-                                                .setLayoutCount = 1,
-                                                .pSetLayouts = &descSetLayout,
                                                 .pushConstantRangeCount = 1,
                                                 .pPushConstantRanges = &pushRange};
     VkPipelineLayout pipelineLayout;
@@ -596,8 +567,6 @@ int main()
         VkRect2D scissor{.extent{.width = (U32)windowSize.x, .height = (U32)windowSize.y}};
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &scissor);
-        vkCmdBindDescriptorSets(
-            cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout, 0, 1, &descSet, 0, nullptr);
 
         {
             float cy = cosf(camYaw), sy = sinf(camYaw);
@@ -622,7 +591,9 @@ int main()
                                                         glm::vec4(-up * halfTan, 0),
                                                         glm::vec4(fwd, 0),
                                                         glm::vec4(pos, 1)),
-                             .worldToScreen = proj * view};
+                             .worldToScreen = proj * view,
+                             .gpScene = PackDevicePtr(gpScene),
+                             ._pad0 = glm::uvec2(0, 0)};
             vkCmdPushConstants(cb,
                                pipelineLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -786,8 +757,6 @@ int main()
     vkDestroyBuffer(device, sceneBuf, nullptr);
     vkUnmapMemory(device, sceneMem);
     vkFreeMemory(device, sceneMem, nullptr);
-    vkDestroyDescriptorPool(device, descPool, nullptr);
-    vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);
     vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroySwapchainKHR(device, swapchain, nullptr);
     vkDestroySurfaceKHR(instance, surface, nullptr);
