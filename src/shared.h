@@ -16,7 +16,7 @@ struct PushConstants
     mat4 worldToScreen;
 };
 
-struct SceneData
+struct GpuScene
 {
     vec4 pointPositions[SCENE_POINT_COUNT];
 };

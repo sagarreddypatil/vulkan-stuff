@@ -25,21 +25,6 @@
             LOG_FATAL("VK_ASSERT FAIL: %s|res=%u", #line, _r);                                     \
     } while (0)
 
-static U32* ReadShader(const char* path, U64& outSize)
-{
-    FILE* f = fopen(path, "rb");
-    if (!f)
-        LOG_FATAL("Failed to open %s", path);
-    fseek(f, 0, SEEK_END);
-    outSize = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    U32* buf = new U32[Cdiv(outSize, 4)];
-    ASSERT(buf != nullptr);
-    fread(buf, 1, outSize, f);
-    fclose(f);
-    return buf;
-}
-
 static U32 FindMemoryType(VkPhysicalDevice physDev, U32 typeFilter, VkMemoryPropertyFlags props)
 {
     VkPhysicalDeviceMemoryProperties memProps;
@@ -115,6 +100,28 @@ static void DestroyImage(VkDevice device, VkImage img, VkDeviceMemory mem, VkIma
     vkDestroyImageView(device, view, nullptr);
     vkDestroyImage(device, img, nullptr);
     vkFreeMemory(device, mem, nullptr);
+}
+
+static VkShaderModule LoadModule(VkDevice device, const char* const path)
+{
+    U64 size;
+    FILE* f = fopen(path, "rb");
+    if (!f)
+        LOG_FATAL("Failed to open %s", path);
+    ON_SCOPE_EXIT(fclose(f));
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    U32* spirv = new U32[Cdiv(size, 4)];
+    ON_SCOPE_EXIT(delete[] spirv);
+    ASSERT(spirv != nullptr);
+    fread(spirv, 1, size, f);
+
+    VkShaderModuleCreateInfo ci{
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = size, .pCode = spirv};
+    VkShaderModule mod;
+    VK_ASSERT(vkCreateShaderModule(device, &ci, nullptr, &mod));
+    return mod;
 }
 
 static constexpr U32 kMaxFramesInFlight = 2;
@@ -241,7 +248,7 @@ int main()
 
     U32 imageCount;
     VkImage swapchainImages[2];
-    VkImageView swapchainImageViews[2];
+    VkImageView swapchainImageViews[ARRAY_COUNT(swapchainImages)];
     VK_ASSERT(vkGetSwapchainImagesKHR(device, swapchain, &imageCount, nullptr));
     ASSERT(imageCount <= ARRAY_COUNT(swapchainImages));
     VK_ASSERT(vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapchainImages));
@@ -300,7 +307,7 @@ int main()
     // Sync objects
     VkFence fences[kMaxFramesInFlight];
     VkSemaphore presentSemaphores[kMaxFramesInFlight];
-    VkSemaphore renderSemaphores[4]; // one per swapchain image
+    VkSemaphore renderSemaphores[ARRAY_COUNT(swapchainImages)]; // one per swapchain image
     VkFenceCreateInfo fenceCI{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
                               .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     VkSemaphoreCreateInfo semaphoreCI{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
@@ -310,14 +317,16 @@ int main()
         VK_ASSERT(vkCreateSemaphore(device, &semaphoreCI, nullptr, &presentSemaphores[i]));
     }
     for (U32 i = 0; i < imageCount; i++)
+    {
         VK_ASSERT(vkCreateSemaphore(device, &semaphoreCI, nullptr, &renderSemaphores[i]));
+    }
 
     // Scene buffer
     VkBuffer sceneBuf;
     VkDeviceMemory sceneMem;
     {
         VkBufferCreateInfo bufCI{.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-                                 .size = sizeof(SceneData),
+                                 .size = sizeof(GpuScene),
                                  .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
         VK_ASSERT(vkCreateBuffer(device, &bufCI, nullptr, &sceneBuf));
 
@@ -332,18 +341,16 @@ int main()
                                                           | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)};
         VK_ASSERT(vkAllocateMemory(device, &memAI, nullptr, &sceneMem));
         VK_ASSERT(vkBindBufferMemory(device, sceneBuf, sceneMem, 0));
-
-        SceneData* mapped;
-        VK_ASSERT(vkMapMemory(device, sceneMem, 0, sizeof(SceneData), 0, (void**)&mapped));
-        for (U32 i = 0; i < SCENE_POINT_COUNT; i++)
-        {
-            float theta = HashF(i, 0) * 2.0f * 3.14159265f;
-            float z = HashF(i, 1) * 2.0f - 1.0f;
-            float r = sqrtf(1.0f - z * z);
-            mapped->pointPositions[i] =
-                glm::vec4(r * cosf(theta), z, r * sinf(theta), 0) * (float)SCENE_ORBIT_RADIUS;
-        }
-        vkUnmapMemory(device, sceneMem);
+    }
+    GpuScene* gpuScene;
+    VK_ASSERT(vkMapMemory(device, sceneMem, 0, sizeof(GpuScene), 0, (void**)&gpuScene));
+    for (U32 i = 0; i < SCENE_POINT_COUNT; i++)
+    {
+        float theta = HashF(i, 0) * 2.0f * 3.14159265f;
+        float z = HashF(i, 1) * 2.0f - 1.0f;
+        float r = sqrtf(1.0f - z * z);
+        gpuScene->pointPositions[i] =
+            glm::vec4(r * cosf(theta), z, r * sinf(theta), 0) * (float)SCENE_ORBIT_RADIUS;
     }
 
     VkDescriptorSetLayoutBinding dslBinding{.binding = 0,
@@ -373,7 +380,7 @@ int main()
     VkDescriptorSet descSet;
     VK_ASSERT(vkAllocateDescriptorSets(device, &dsAI, &descSet));
 
-    VkDescriptorBufferInfo descBufInfo{.buffer = sceneBuf, .offset = 0, .range = sizeof(SceneData)};
+    VkDescriptorBufferInfo descBufInfo{.buffer = sceneBuf, .offset = 0, .range = sizeof(GpuScene)};
     VkWriteDescriptorSet descWrite{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
                                    .dstSet = descSet,
                                    .dstBinding = 0,
@@ -382,22 +389,10 @@ int main()
                                    .pBufferInfo = &descBufInfo};
     vkUpdateDescriptorSets(device, 1, &descWrite, 0, nullptr);
 
-    // Shader modules
-    auto LoadModule = [&](const char* path)
-    {
-        U64 size;
-        U32* spirv = ReadShader(path, size);
-        VkShaderModuleCreateInfo ci{
-            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = size, .pCode = spirv};
-        VkShaderModule mod;
-        VK_ASSERT(vkCreateShaderModule(device, &ci, nullptr, &mod));
-        delete[] spirv;
-        return mod;
-    };
-    VkShaderModule globeVert = LoadModule("shaders/globe.vert.spv");
-    VkShaderModule globeFrag = LoadModule("shaders/globe.frag.spv");
-    VkShaderModule pointVert = LoadModule("shaders/point.vert.spv");
-    VkShaderModule pointFrag = LoadModule("shaders/point.frag.spv");
+    VkShaderModule globeVert = LoadModule(device, "shaders/globe.vert.spv");
+    VkShaderModule globeFrag = LoadModule(device, "shaders/globe.frag.spv");
+    VkShaderModule pointVert = LoadModule(device, "shaders/point.vert.spv");
+    VkShaderModule pointFrag = LoadModule(device, "shaders/point.frag.spv");
 
     // Pipeline layout
     VkPushConstantRange pushRange{.stageFlags =
@@ -789,6 +784,7 @@ int main()
     DestroyImage(device, msaaColorImage, msaaColorMemory, msaaColorView);
     DestroyImage(device, depthImage, depthMemory, depthView);
     vkDestroyBuffer(device, sceneBuf, nullptr);
+    vkUnmapMemory(device, sceneMem);
     vkFreeMemory(device, sceneMem, nullptr);
     vkDestroyDescriptorPool(device, descPool, nullptr);
     vkDestroyDescriptorSetLayout(device, descSetLayout, nullptr);

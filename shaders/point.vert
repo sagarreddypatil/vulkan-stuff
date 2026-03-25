@@ -3,7 +3,7 @@
 #include "shared.h"
 
 layout(push_constant) uniform PushConstantBlock { PushConstants pc; };
-layout(set = 0, binding = 0) readonly buffer SceneBuffer { SceneData scene; };
+layout(set = 0, binding = 0) readonly buffer SceneBuffer { GpuScene scene; };
 
 void main()
 {

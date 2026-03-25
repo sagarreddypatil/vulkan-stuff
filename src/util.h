@@ -90,3 +90,17 @@ void Internal_LogWrite(
 template <typename T, size_t N>
 char (*Internal_ArrayCountHelper(T (&)[N]))[N];
 #define ARRAY_COUNT(arr) (sizeof(*Internal_ArrayCountHelper(arr)))
+
+#define CONCAT2(a, b) a##b
+#define CONCAT(a, b) CONCAT2(a, b)
+
+#define ON_SCOPE_EXIT(stmt)                                                                        \
+    auto CONCAT(scopeExitFunc_, __LINE__) = [&]() { stmt; };                                       \
+    struct CONCAT(ScopeExit_, __LINE__)                                                            \
+    {                                                                                              \
+        ~CONCAT(ScopeExit_, __LINE__)() { f(); }                                                   \
+        decltype(CONCAT(scopeExitFunc_, __LINE__)) f;                                              \
+    } CONCAT(scopeExit_, __LINE__)                                                                 \
+    {                                                                                              \
+        CONCAT(scopeExitFunc_, __LINE__)                                                           \
+    }
