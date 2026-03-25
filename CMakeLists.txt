@@ -4,7 +4,7 @@ project(triangle CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wframe-larger-than=1048576 -Werror=frame-larger-than=1048576")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -march=native -Wframe-larger-than=1048576 -Werror=frame-larger-than=1048576")
 
 include(FetchContent)
 

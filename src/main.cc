@@ -51,17 +51,24 @@ static U32 FindMemoryType(VkPhysicalDevice physDev, U32 typeFilter, VkMemoryProp
     return 0;
 }
 
-static U32 Xorshift32(U32& state)
+static void Fnv1a(U32& h, const U8* data, U32 len)
 {
-    state ^= state << 13;
-    state ^= state >> 17;
-    state ^= state << 5;
-    return state;
+    for (U32 i = 0; i < len; i++)
+    {
+        h ^= data[i];
+        h *= 0x01000193;
+    }
 }
 
-static float RandF(U32& rng)
+static float HashF(U32 index, U32 channel)
 {
-    return float(Xorshift32(rng)) / float(0xFFFFFFFFu);
+    U32 h = 0x811c9dc5;
+    for (U32 i = 0; i < 10; ++i)
+    {
+        Fnv1a(h, reinterpret_cast<U8*>(&channel), sizeof(channel));
+        Fnv1a(h, reinterpret_cast<U8*>(&index), sizeof(index));
+    }
+    return float(h & ((1 << 24) - 1)) / float((1 << 24) - 1);
 }
 
 static void CreateImage(VkDevice device,
@@ -328,11 +335,10 @@ int main()
 
         SceneData* mapped;
         VK_ASSERT(vkMapMemory(device, sceneMem, 0, sizeof(SceneData), 0, (void**)&mapped));
-        U32 rng = 0xDEADBEEF;
         for (U32 i = 0; i < SCENE_POINT_COUNT; i++)
         {
-            float theta = RandF(rng) * 2.0f * 3.14159265f;
-            float z = RandF(rng) * 2.0f - 1.0f;
+            float theta = HashF(i, 0) * 2.0f * 3.14159265f;
+            float z = HashF(i, 1) * 2.0f - 1.0f;
             float r = sqrtf(1.0f - z * z);
             mapped->pointPositions[i] =
                 glm::vec4(r * cosf(theta), z, r * sinf(theta), 0) * (float)SCENE_ORBIT_RADIUS;
@@ -618,7 +624,7 @@ int main()
                            glm::vec4(0, 0, f / (n - f), -1),
                            glm::vec4(0, 0, n * f / (n - f), 0));
             PushConstants pc{.screenToWorld = glm::mat4(glm::vec4(right * aspect * halfTan, 0),
-                                                        glm::vec4(up * halfTan, 0),
+                                                        glm::vec4(-up * halfTan, 0),
                                                         glm::vec4(fwd, 0),
                                                         glm::vec4(pos, 1)),
                              .worldToScreen = proj * view};

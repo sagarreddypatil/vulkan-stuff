@@ -8,5 +8,5 @@ layout(set = 0, binding = 0) readonly buffer SceneBuffer { SceneData scene; };
 void main()
 {
     gl_Position = pc.worldToScreen * vec4(scene.pointPositions[gl_VertexIndex].xyz, 1.0);
-    gl_PointSize = 2.0;
+    gl_PointSize = 5.0;
 }
