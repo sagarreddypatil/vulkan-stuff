@@ -25,8 +25,6 @@
             LOG_FATAL("VK_ASSERT FAIL: %s|res=%u", #line, _r);                                     \
     } while (0)
 
-static constexpr U32 maxFramesInFlight = 2;
-
 static U32* ReadShader(const char* path, U64& outSize)
 {
     FILE* f = fopen(path, "rb");
@@ -41,6 +39,8 @@ static U32* ReadShader(const char* path, U64& outSize)
     fclose(f);
     return buf;
 }
+
+static constexpr U32 kMaxFramesInFlight = 2;
 
 int main()
 {
@@ -125,7 +125,7 @@ int main()
 
     // Window
     SDL_Window* window =
-        SDL_CreateWindow("Triangle", 1280u, 720u, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+        SDL_CreateWindow("Triangle", 1280U, 720U, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     ASSERT(window != nullptr);
     VkSurfaceKHR surface;
     ASSERT(SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface));
@@ -156,7 +156,7 @@ int main()
                                          .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                                          .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
                                          .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-                                         .presentMode = VK_PRESENT_MODE_FIFO_KHR};
+                                         .presentMode = VK_PRESENT_MODE_MAILBOX_KHR};
     VkSwapchainKHR swapchain;
     VK_ASSERT(vkCreateSwapchainKHR(device, &swapchainCI, nullptr, &swapchain));
 
@@ -185,20 +185,20 @@ int main()
     VkCommandPool commandPool;
     VK_ASSERT(vkCreateCommandPool(device, &commandPoolCI, nullptr, &commandPool));
 
-    VkCommandBuffer commandBuffers[maxFramesInFlight];
+    VkCommandBuffer commandBuffers[kMaxFramesInFlight];
     VkCommandBufferAllocateInfo cbAllocCI{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
                                           .commandPool = commandPool,
-                                          .commandBufferCount = maxFramesInFlight};
+                                          .commandBufferCount = kMaxFramesInFlight};
     VK_ASSERT(vkAllocateCommandBuffers(device, &cbAllocCI, commandBuffers));
 
     // Sync objects
-    VkFence fences[maxFramesInFlight];
-    VkSemaphore presentSemaphores[maxFramesInFlight];
+    VkFence fences[kMaxFramesInFlight];
+    VkSemaphore presentSemaphores[kMaxFramesInFlight];
     VkSemaphore renderSemaphores[4]; // one per swapchain image
     VkFenceCreateInfo fenceCI{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
                               .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     VkSemaphoreCreateInfo semaphoreCI{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    for (U32 i = 0; i < maxFramesInFlight; i++)
+    for (U32 i = 0; i < kMaxFramesInFlight; i++)
     {
         VK_ASSERT(vkCreateFence(device, &fenceCI, nullptr, &fences[i]));
         VK_ASSERT(vkCreateSemaphore(device, &semaphoreCI, nullptr, &presentSemaphores[i]));
@@ -223,9 +223,8 @@ int main()
     delete[] vertSpirv;
     delete[] fragSpirv;
 
-    VkPushConstantRange pushRange{.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   .offset = 0,
-                                   .size = sizeof(PushConstants)};
+    VkPushConstantRange pushRange{
+        .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT, .offset = 0, .size = sizeof(PushConstants)};
     VkPipelineLayoutCreateInfo pipelineLayoutCI{.sType =
                                                     VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
                                                 .pushConstantRangeCount = 1,
@@ -368,11 +367,10 @@ int main()
             glm::vec3 up = glm::cross(right, fwd);
             float aspect = float(windowSize.x) / float(windowSize.y);
             float halfTan = tanf(35.0f * 3.14159265f / 180.0f);
-            PushConstants pc{.screenToWorld = glm::mat4(
-                                 glm::vec4(right * aspect * halfTan, 0),
-                                 glm::vec4(up * halfTan, 0),
-                                 glm::vec4(fwd, 0),
-                                 glm::vec4(pos, 1))};
+            PushConstants pc{.screenToWorld = glm::mat4(glm::vec4(right * aspect * halfTan, 0),
+                                                        glm::vec4(up * halfTan, 0),
+                                                        glm::vec4(fwd, 0),
+                                                        glm::vec4(pos, 1))};
             vkCmdPushConstants(
                 cb, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
         }
@@ -409,7 +407,7 @@ int main()
                                 .pSignalSemaphores = &renderSemaphores[imageIndex]};
         VK_ASSERT(vkQueueSubmit(queue, 1, &submitInfo, fences[frameIndex]));
 
-        frameIndex = (frameIndex + 1) % maxFramesInFlight;
+        frameIndex = (frameIndex + 1) % kMaxFramesInFlight;
 
         VkPresentInfoKHR presentInfo{.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                                      .waitSemaphoreCount = 1,
@@ -438,14 +436,18 @@ int main()
                 camYaw += event.motion.xrel * 0.005f;
                 camPitch -= event.motion.yrel * 0.005f;
                 float limit = 1.55f;
-                if (camPitch > limit) camPitch = limit;
-                if (camPitch < -limit) camPitch = -limit;
+                if (camPitch > limit)
+                    camPitch = limit;
+                if (camPitch < -limit)
+                    camPitch = -limit;
             }
             if (event.type == SDL_EVENT_MOUSE_WHEEL)
             {
                 camDist -= event.wheel.y * 0.3f;
-                if (camDist < 1.5f) camDist = 1.5f;
-                if (camDist > 20.0f) camDist = 20.0f;
+                if (camDist < 1.5f)
+                    camDist = 1.5f;
+                if (camDist > 20.0f)
+                    camDist = 20.0f;
             }
         }
 
@@ -483,7 +485,7 @@ int main()
     VK_ASSERT(vkDeviceWaitIdle(device));
     vkDestroyPipeline(device, pipeline, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-    for (U32 i = 0; i < maxFramesInFlight; i++)
+    for (U32 i = 0; i < kMaxFramesInFlight; i++)
     {
         vkDestroyFence(device, fences[i], nullptr);
         vkDestroySemaphore(device, presentSemaphores[i], nullptr);
