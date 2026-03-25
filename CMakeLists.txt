@@ -65,8 +65,8 @@ foreach(SHADER ${SHADER_SOURCES})
     add_custom_command(
         OUTPUT ${SHADER_OUTPUT}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${SHADER_BINARY_DIR}
-        COMMAND ${GLSLC} ${SHADER} -o ${SHADER_OUTPUT}
-        DEPENDS ${SHADER}
+        COMMAND ${GLSLC} -I${CMAKE_SOURCE_DIR}/src ${SHADER} -o ${SHADER_OUTPUT}
+        DEPENDS ${SHADER} ${CMAKE_SOURCE_DIR}/src/shared.h
         COMMENT "Compiling shader ${SHADER_NAME}"
     )
     list(APPEND SHADER_BINARIES ${SHADER_OUTPUT})

@@ -1,9 +1,11 @@
+#include "shared.h"
 #include "util.h"
 
 #define VOLK_IMPLEMENTATION
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 #include <glm/glm.hpp>
+#include <math.h>
 #include <volk.h>
 #include <vulkan/vulkan.h>
 
@@ -130,6 +132,12 @@ int main()
     glm::ivec2 windowSize;
     ASSERT(SDL_GetWindowSize(window, &windowSize.x, &windowSize.y));
 
+    // Orbit camera state
+    float camYaw = 0.0f;
+    float camPitch = 0.3f;
+    float camDist = 3.0f;
+    bool mouseDown = false;
+
     VkSurfaceCapabilitiesKHR surfaceCaps{};
     VK_ASSERT(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps));
     VkExtent2D swapchainExtent{surfaceCaps.currentExtent};
@@ -215,8 +223,13 @@ int main()
     delete[] vertSpirv;
     delete[] fragSpirv;
 
+    VkPushConstantRange pushRange{.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   .offset = 0,
+                                   .size = sizeof(PushConstants)};
     VkPipelineLayoutCreateInfo pipelineLayoutCI{.sType =
-                                                    VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+                                                    VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+                                                .pushConstantRangeCount = 1,
+                                                .pPushConstantRanges = &pushRange};
     VkPipelineLayout pipelineLayout;
     VK_ASSERT(vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout));
 
@@ -337,14 +350,32 @@ int main()
             .pColorAttachments = &colorAttachment};
         vkCmdBeginRendering(cb, &renderingInfo);
 
-        VkViewport vp{.width = (float)windowSize.x,
-                      .height = (float)windowSize.y,
+        VkViewport vp{.width = float(windowSize.x),
+                      .height = float(windowSize.y),
                       .minDepth = 0.0f,
                       .maxDepth = 1.0f};
         VkRect2D scissor{.extent{.width = (U32)windowSize.x, .height = (U32)windowSize.y}};
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &scissor);
         vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+        {
+            float cy = cosf(camYaw), sy = sinf(camYaw);
+            float cp = cosf(camPitch), sp = sinf(camPitch);
+            glm::vec3 pos = glm::vec3(cy * cp, sp, sy * cp) * camDist;
+            glm::vec3 fwd = glm::normalize(-pos);
+            glm::vec3 right = glm::normalize(glm::cross(fwd, glm::vec3(0, 1, 0)));
+            glm::vec3 up = glm::cross(right, fwd);
+            float aspect = float(windowSize.x) / float(windowSize.y);
+            float halfTan = tanf(35.0f * 3.14159265f / 180.0f);
+            PushConstants pc{.screenToWorld = glm::mat4(
+                                 glm::vec4(right * aspect * halfTan, 0),
+                                 glm::vec4(up * halfTan, 0),
+                                 glm::vec4(fwd, 0),
+                                 glm::vec4(pos, 1))};
+            vkCmdPushConstants(
+                cb, pipelineLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(pc), &pc);
+        }
         vkCmdDraw(cb, 3, 1, 0, 0);
 
         vkCmdEndRendering(cb);
@@ -398,6 +429,24 @@ int main()
                 quit = true;
             if (event.type == SDL_EVENT_WINDOW_RESIZED)
                 updateSwapchain = true;
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN && event.button.button == 1)
+                mouseDown = true;
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_UP && event.button.button == 1)
+                mouseDown = false;
+            if (event.type == SDL_EVENT_MOUSE_MOTION && mouseDown)
+            {
+                camYaw += event.motion.xrel * 0.005f;
+                camPitch -= event.motion.yrel * 0.005f;
+                float limit = 1.55f;
+                if (camPitch > limit) camPitch = limit;
+                if (camPitch < -limit) camPitch = -limit;
+            }
+            if (event.type == SDL_EVENT_MOUSE_WHEEL)
+            {
+                camDist -= event.wheel.y * 0.3f;
+                if (camDist < 1.5f) camDist = 1.5f;
+                if (camDist > 20.0f) camDist = 20.0f;
+            }
         }
 
         if (updateSwapchain)
