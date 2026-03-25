@@ -102,7 +102,7 @@ static void DestroyImage(VkDevice device, VkImage img, VkDeviceMemory mem, VkIma
     vkFreeMemory(device, mem, nullptr);
 }
 
-static VkShaderModule LoadModule(VkDevice device, const char* shaderName, const char* stage)
+static VkShaderModule LoadShaderModule(VkDevice device, const char* shaderName, const char* stage)
 {
     char path[256];
     int pathLen = snprintf(path, sizeof(path), "shaders/%s.%s.spv", shaderName, stage);
@@ -134,21 +134,24 @@ static VkPipeline CreateGraphicsPipeline(VkDevice device,
                                          const char* shaderName,
                                          VkPrimitiveTopology topology)
 {
-    VkShaderModule vertex = LoadModule(device, shaderName, "vert");
+    VkShaderModule vertex = LoadShaderModule(device, shaderName, "vert");
     ON_SCOPE_EXIT(vkDestroyShaderModule(device, vertex, nullptr));
-    VkShaderModule fragment = LoadModule(device, shaderName, "frag");
+    VkShaderModule fragment = LoadShaderModule(device, shaderName, "frag");
     ON_SCOPE_EXIT(vkDestroyShaderModule(device, fragment, nullptr));
     VkPipelineShaderStageCreateInfo shaderStages[2]{
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-         .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vertex, .pName = "main"},
+         .stage = VK_SHADER_STAGE_VERTEX_BIT,
+         .module = vertex,
+         .pName = "main"},
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-         .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragment, .pName = "main"},
+         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = fragment,
+         .pName = "main"},
     };
     VkPipelineVertexInputStateCreateInfo vertexInputState{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     VkPipelineInputAssemblyStateCreateInfo inputAssemblyState{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = topology};
+        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = topology};
     VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dynamicState{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
@@ -291,8 +294,12 @@ int main()
     ASSERT(window != nullptr);
     VkSurfaceKHR surface;
     ASSERT(SDL_Vulkan_CreateSurface(window, instance, nullptr, &surface));
-    glm::ivec2 windowSize;
-    ASSERT(SDL_GetWindowSize(window, &windowSize.x, &windowSize.y));
+    I32 windowSizeX;
+    I32 windowSizeY;
+    ASSERT(SDL_GetWindowSize(window, &windowSizeX, &windowSizeY));
+    ASSERT(windowSizeX > 0);
+    ASSERT(windowSizeY > 0);
+    glm::uvec2 windowSize(windowSizeX, windowSizeY);
 
     // Orbit camera state
     float camYaw = 0.0f;
@@ -304,7 +311,7 @@ int main()
     VK_ASSERT(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps));
     VkExtent2D swapchainExtent{surfaceCaps.currentExtent};
     if (surfaceCaps.currentExtent.width == 0xFFFFFFFF)
-        swapchainExtent = {.width = (U32)windowSize.x, .height = (U32)windowSize.y};
+        swapchainExtent = {.width = windowSize.x, .height = windowSize.y};
 
     // Swapchain
     constexpr VkFormat kImageFormat = VK_FORMAT_B8G8R8A8_SRGB;
@@ -347,8 +354,8 @@ int main()
     VkImageView msaaColorView, depthView;
     CreateImage(device,
                 physicalDevice,
-                (U32)windowSize.x,
-                (U32)windowSize.y,
+                windowSize.x,
+                windowSize.y,
                 kImageFormat,
                 kMsaaSamples,
                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
@@ -358,8 +365,8 @@ int main()
                 msaaColorView);
     CreateImage(device,
                 physicalDevice,
-                (U32)windowSize.x,
-                (U32)windowSize.y,
+                windowSize.x,
+                windowSize.y,
                 kDepthFormat,
                 kMsaaSamples,
                 VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
@@ -551,7 +558,7 @@ int main()
                                                   .clearValue{.depthStencil{1.0f, 0}}};
         VkRenderingInfo renderingInfo{
             .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-            .renderArea{.extent{.width = (U32)windowSize.x, .height = (U32)windowSize.y}},
+            .renderArea{.extent{.width = windowSize.x, .height = windowSize.y}},
             .layerCount = 1,
             .colorAttachmentCount = 1,
             .pColorAttachments = &colorAttachment,
@@ -562,7 +569,7 @@ int main()
                       .height = float(windowSize.y),
                       .minDepth = 0.0f,
                       .maxDepth = 1.0f};
-        VkRect2D scissor{.extent{.width = (U32)windowSize.x, .height = (U32)windowSize.y}};
+        VkRect2D scissor{.extent{.width = windowSize.x, .height = windowSize.y}};
         vkCmdSetViewport(cb, 0, 1, &vp);
         vkCmdSetScissor(cb, 0, 1, &scissor);
 
@@ -684,7 +691,10 @@ int main()
         if (updateSwapchain)
         {
             updateSwapchain = false;
-            ASSERT(SDL_GetWindowSize(window, &windowSize.x, &windowSize.y));
+            ASSERT(SDL_GetWindowSize(window, &windowSizeX, &windowSizeY));
+            ASSERT(windowSizeX > 0);
+            ASSERT(windowSizeY > 0);
+            windowSize = glm::uvec2(windowSizeX, windowSizeY);
             VK_ASSERT(vkDeviceWaitIdle(device));
             VK_ASSERT(
                 vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps));

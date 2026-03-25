@@ -16,41 +16,6 @@ typedef int64_t I64;
 #define Max(a, b) ((a) > (b) ? (a) : (b))
 #define Cdiv(a, b) (((a) + (b) - 1) / (b))
 
-template <U32 kCapacity>
-class String
-{
-  public:
-    constexpr String() { m_buf[0] = '\0'; }
-    constexpr String(const char* const pStr)
-    {
-        m_size = Min(__builtin_strlen(pStr), kCapacity);
-        __builtin_memcpy(m_buf, pStr, m_size);
-        m_buf[m_size] = '\0';
-    }
-
-    constexpr U64 Size() const { return m_size; }
-    constexpr const char* Str() const { return m_buf; }
-
-    constexpr bool operator==(const char* const pStr) const
-    {
-        return __builtin_strcmp(m_buf, pStr) == 0;
-    }
-
-    template <U64 kOther>
-    constexpr bool operator==(const String<kOther>& pOther) const
-    {
-        if (m_size != pOther.Size())
-            return false;
-        return __builtin_memcmp(m_buf, pOther.Str(), m_size) == 0;
-    }
-
-  private:
-    char m_buf[kCapacity + 1];
-    U64 m_size = 0;
-};
-
-using EzString = String<247>;
-
 static constexpr const char* PathBasename(const char* path)
 {
     const char* base = path;
