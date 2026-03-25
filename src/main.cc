@@ -9,6 +9,12 @@
 #include <volk.h>
 #include <vulkan/vulkan.h>
 
+static constexpr U32 kMaxFramesInFlight = 2;
+static constexpr U32 kMaxNumSwapchainImages = 2;
+static constexpr VkSampleCountFlagBits kMsaaSamples = VK_SAMPLE_COUNT_32_BIT;
+constexpr VkFormat kImageFormat = VK_FORMAT_B8G8R8A8_SRGB;
+constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
+
 #define ASSERT(line)                                                                               \
     do                                                                                             \
     {                                                                                              \
@@ -100,6 +106,89 @@ static void DestroyImage(VkDevice device, VkImage img, VkDeviceMemory mem, VkIma
     vkDestroyImageView(device, view, nullptr);
     vkDestroyImage(device, img, nullptr);
     vkFreeMemory(device, mem, nullptr);
+}
+
+static void RefreshSwapchain(VkPhysicalDevice physicalDevice,
+                             VkDevice device,
+                             VkSurfaceKHR surface,
+                             glm::uvec2 windowSize,
+                             VkSwapchainKHR& swapchain,
+                             U32& imageCount,
+                             VkImage (&swapchainImages)[kMaxNumSwapchainImages],
+                             VkImageView (&swapchainImageViews)[kMaxNumSwapchainImages],
+                             VkImage& msaaColorImage,
+                             VkDeviceMemory& msaaColorMemory,
+                             VkImageView& msaaColorView,
+                             VkImage& depthImage,
+                             VkDeviceMemory& depthMemory,
+                             VkImageView& depthView)
+{
+    VkSwapchainCreateInfoKHR swapchainCI{.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
+                                         .surface = surface,
+                                         .imageFormat = kImageFormat,
+                                         .imageColorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR,
+                                         .imageArrayLayers = 1,
+                                         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                                         .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+                                         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                                         .presentMode = VK_PRESENT_MODE_MAILBOX_KHR};
+
+    VkSurfaceCapabilitiesKHR surfaceCaps{};
+    VK_ASSERT(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps));
+    swapchainCI.minImageCount = surfaceCaps.minImageCount;
+    swapchainCI.imageExtent = surfaceCaps.currentExtent.width == 0xFFFFFFFF
+                                  ? VkExtent2D{.width = windowSize.x, .height = windowSize.y}
+                                  : surfaceCaps.currentExtent;
+    VkSwapchainKHR oldSwapchain = swapchain;
+    swapchainCI.oldSwapchain = oldSwapchain;
+    VK_ASSERT(vkCreateSwapchainKHR(device, &swapchainCI, nullptr, &swapchain));
+    if (oldSwapchain != VK_NULL_HANDLE)
+    {
+        for (U32 i = 0; i < imageCount; i++)
+            vkDestroyImageView(device, swapchainImageViews[i], nullptr);
+        vkDestroySwapchainKHR(device, oldSwapchain, nullptr);
+    }
+    if (msaaColorImage != VK_NULL_HANDLE)
+        DestroyImage(device, msaaColorImage, msaaColorMemory, msaaColorView);
+    if (depthImage != VK_NULL_HANDLE)
+        DestroyImage(device, depthImage, depthMemory, depthView);
+    CreateImage(device,
+                physicalDevice,
+                windowSize.x,
+                windowSize.y,
+                kImageFormat,
+                kMsaaSamples,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT,
+                msaaColorImage,
+                msaaColorMemory,
+                msaaColorView);
+    CreateImage(device,
+                physicalDevice,
+                windowSize.x,
+                windowSize.y,
+                kDepthFormat,
+                kMsaaSamples,
+                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                VK_IMAGE_ASPECT_DEPTH_BIT,
+                depthImage,
+                depthMemory,
+                depthView);
+
+    VK_ASSERT(vkGetSwapchainImagesKHR(device, swapchain, &imageCount, nullptr));
+    ASSERT(imageCount <= ARRAY_COUNT(swapchainImages));
+    VK_ASSERT(vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapchainImages));
+    for (U32 i = 0; i < imageCount; i++)
+    {
+        VkImageViewCreateInfo viewCI{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                     .image = swapchainImages[i],
+                                     .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                     .format = kImageFormat,
+                                     .subresourceRange{.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                                                       .levelCount = 1,
+                                                       .layerCount = 1}};
+        VK_ASSERT(vkCreateImageView(device, &viewCI, nullptr, &swapchainImageViews[i]));
+    }
 }
 
 static VkShaderModule LoadShaderModule(VkDevice device, const char* shaderName, const char* stage)
@@ -208,9 +297,6 @@ static glm::uvec2 PackDevicePtr(VkDeviceAddress gp)
     return {U32(gp & U32(-1)), U32(gp >> 32)};
 }
 
-static constexpr U32 kMaxFramesInFlight = 2;
-static constexpr VkSampleCountFlagBits kMsaaSamples = VK_SAMPLE_COUNT_32_BIT;
-
 int main()
 {
     ASSERT(SDL_Init(SDL_INIT_VIDEO));
@@ -307,73 +393,31 @@ int main()
     float camDist = 3.0f;
     bool mouseDown = false;
 
-    VkSurfaceCapabilitiesKHR surfaceCaps{};
-    VK_ASSERT(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps));
-    VkExtent2D swapchainExtent{surfaceCaps.currentExtent};
-    if (surfaceCaps.currentExtent.width == 0xFFFFFFFF)
-        swapchainExtent = {.width = windowSize.x, .height = windowSize.y};
-
     // Swapchain
-    constexpr VkFormat kImageFormat = VK_FORMAT_B8G8R8A8_SRGB;
-    constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
-    VkSwapchainCreateInfoKHR swapchainCI{.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-                                         .surface = surface,
-                                         .minImageCount = surfaceCaps.minImageCount,
-                                         .imageFormat = kImageFormat,
-                                         .imageColorSpace = VK_COLORSPACE_SRGB_NONLINEAR_KHR,
-                                         .imageExtent = swapchainExtent,
-                                         .imageArrayLayers = 1,
-                                         .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                                         .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
-                                         .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
-                                         .presentMode = VK_PRESENT_MODE_MAILBOX_KHR};
-    VkSwapchainKHR swapchain;
-    VK_ASSERT(vkCreateSwapchainKHR(device, &swapchainCI, nullptr, &swapchain));
-
-    U32 imageCount;
-    VkImage swapchainImages[2];
-    VkImageView swapchainImageViews[ARRAY_COUNT(swapchainImages)];
-    VK_ASSERT(vkGetSwapchainImagesKHR(device, swapchain, &imageCount, nullptr));
-    ASSERT(imageCount <= ARRAY_COUNT(swapchainImages));
-    VK_ASSERT(vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapchainImages));
-    for (U32 i = 0; i < imageCount; i++)
-    {
-        VkImageViewCreateInfo viewCI{.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                                     .image = swapchainImages[i],
-                                     .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                                     .format = kImageFormat,
-                                     .subresourceRange{.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                                                       .levelCount = 1,
-                                                       .layerCount = 1}};
-        VK_ASSERT(vkCreateImageView(device, &viewCI, nullptr, &swapchainImageViews[i]));
-    }
-
-    // MSAA color + depth images
-    VkImage msaaColorImage, depthImage;
-    VkDeviceMemory msaaColorMemory, depthMemory;
-    VkImageView msaaColorView, depthView;
-    CreateImage(device,
-                physicalDevice,
-                windowSize.x,
-                windowSize.y,
-                kImageFormat,
-                kMsaaSamples,
-                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                VK_IMAGE_ASPECT_COLOR_BIT,
-                msaaColorImage,
-                msaaColorMemory,
-                msaaColorView);
-    CreateImage(device,
-                physicalDevice,
-                windowSize.x,
-                windowSize.y,
-                kDepthFormat,
-                kMsaaSamples,
-                VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                VK_IMAGE_ASPECT_DEPTH_BIT,
-                depthImage,
-                depthMemory,
-                depthView);
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    U32 imageCount = 0;
+    VkImage swapchainImages[kMaxNumSwapchainImages];
+    VkImageView swapchainImageViews[kMaxNumSwapchainImages];
+    VkImage msaaColorImage = VK_NULL_HANDLE;
+    VkImage depthImage = VK_NULL_HANDLE;
+    VkDeviceMemory msaaColorMemory = VK_NULL_HANDLE;
+    VkDeviceMemory depthMemory = VK_NULL_HANDLE;
+    VkImageView msaaColorView = VK_NULL_HANDLE;
+    VkImageView depthView = VK_NULL_HANDLE;
+    RefreshSwapchain(physicalDevice,
+                     device,
+                     surface,
+                     windowSize,
+                     swapchain,
+                     imageCount,
+                     swapchainImages,
+                     swapchainImageViews,
+                     msaaColorImage,
+                     msaaColorMemory,
+                     msaaColorView,
+                     depthImage,
+                     depthMemory,
+                     depthView);
 
     // Command pool + buffers
     VkCommandPoolCreateInfo commandPoolCI{.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -696,52 +740,20 @@ int main()
             ASSERT(windowSizeY > 0);
             windowSize = glm::uvec2(windowSizeX, windowSizeY);
             VK_ASSERT(vkDeviceWaitIdle(device));
-            VK_ASSERT(
-                vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physicalDevice, surface, &surfaceCaps));
-            swapchainCI.oldSwapchain = swapchain;
-            swapchainCI.imageExtent = {.width = (U32)windowSize.x, .height = (U32)windowSize.y};
-            VK_ASSERT(vkCreateSwapchainKHR(device, &swapchainCI, nullptr, &swapchain));
-            DestroyImage(device, msaaColorImage, msaaColorMemory, msaaColorView);
-            DestroyImage(device, depthImage, depthMemory, depthView);
-            CreateImage(device,
-                        physicalDevice,
-                        (U32)windowSize.x,
-                        (U32)windowSize.y,
-                        kImageFormat,
-                        kMsaaSamples,
-                        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                        VK_IMAGE_ASPECT_COLOR_BIT,
-                        msaaColorImage,
-                        msaaColorMemory,
-                        msaaColorView);
-            CreateImage(device,
-                        physicalDevice,
-                        (U32)windowSize.x,
-                        (U32)windowSize.y,
-                        kDepthFormat,
-                        kMsaaSamples,
-                        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                        VK_IMAGE_ASPECT_DEPTH_BIT,
-                        depthImage,
-                        depthMemory,
-                        depthView);
-            for (U32 i = 0; i < imageCount; i++)
-                vkDestroyImageView(device, swapchainImageViews[i], nullptr);
-            vkDestroySwapchainKHR(device, swapchainCI.oldSwapchain, nullptr);
-            VK_ASSERT(vkGetSwapchainImagesKHR(device, swapchain, &imageCount, nullptr));
-            ASSERT(imageCount <= ARRAY_COUNT(swapchainImages));
-            VK_ASSERT(vkGetSwapchainImagesKHR(device, swapchain, &imageCount, swapchainImages));
-            for (U32 i = 0; i < imageCount; i++)
-            {
-                VkImageViewCreateInfo viewCI{
-                    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                    .image = swapchainImages[i],
-                    .viewType = VK_IMAGE_VIEW_TYPE_2D,
-                    .format = kImageFormat,
-                    .subresourceRange{
-                        .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .levelCount = 1, .layerCount = 1}};
-                VK_ASSERT(vkCreateImageView(device, &viewCI, nullptr, &swapchainImageViews[i]));
-            }
+            RefreshSwapchain(physicalDevice,
+                             device,
+                             surface,
+                             windowSize,
+                             swapchain,
+                             imageCount,
+                             swapchainImages,
+                             swapchainImageViews,
+                             msaaColorImage,
+                             msaaColorMemory,
+                             msaaColorView,
+                             depthImage,
+                             depthMemory,
+                             depthView);
         }
     }
 
