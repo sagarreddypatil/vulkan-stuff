@@ -9,7 +9,6 @@
 #include <volk.h>
 #include <vulkan/vulkan.h>
 
-static constexpr U32 kMaxFramesInFlight = 2;
 static constexpr U32 kMaxNumSwapchainImages = 2;
 static constexpr VkSampleCountFlagBits kMsaaSamples = VK_SAMPLE_COUNT_32_BIT;
 constexpr VkFormat kImageFormat = VK_FORMAT_B8G8R8A8_SRGB;
@@ -426,28 +425,23 @@ int main()
     VkCommandPool commandPool;
     VK_ASSERT(vkCreateCommandPool(device, &commandPoolCI, nullptr, &commandPool));
 
-    VkCommandBuffer commandBuffers[kMaxFramesInFlight];
+    VkCommandBuffer cb;
     VkCommandBufferAllocateInfo cbAllocCI{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
                                           .commandPool = commandPool,
-                                          .commandBufferCount = kMaxFramesInFlight};
-    VK_ASSERT(vkAllocateCommandBuffers(device, &cbAllocCI, commandBuffers));
+                                          .commandBufferCount = 1};
+    VK_ASSERT(vkAllocateCommandBuffers(device, &cbAllocCI, &cb));
 
     // Sync objects
-    VkFence fences[kMaxFramesInFlight];
-    VkSemaphore presentSemaphores[kMaxFramesInFlight];
+    VkFence fence;
+    VkSemaphore presentSemaphore;
     VkSemaphore renderSemaphores[ARRAY_COUNT(swapchainImages)]; // one per swapchain image
     VkFenceCreateInfo fenceCI{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
                               .flags = VK_FENCE_CREATE_SIGNALED_BIT};
     VkSemaphoreCreateInfo semaphoreCI{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    for (U32 i = 0; i < kMaxFramesInFlight; i++)
-    {
-        VK_ASSERT(vkCreateFence(device, &fenceCI, nullptr, &fences[i]));
-        VK_ASSERT(vkCreateSemaphore(device, &semaphoreCI, nullptr, &presentSemaphores[i]));
-    }
+    VK_ASSERT(vkCreateFence(device, &fenceCI, nullptr, &fence));
+    VK_ASSERT(vkCreateSemaphore(device, &semaphoreCI, nullptr, &presentSemaphore));
     for (U32 i = 0; i < imageCount; i++)
-    {
         VK_ASSERT(vkCreateSemaphore(device, &semaphoreCI, nullptr, &renderSemaphores[i]));
-    }
 
     // Scene buffer
     VkBuffer sceneBuf;
@@ -476,6 +470,11 @@ int main()
     }
     GpuScene* gpuScene;
     VK_ASSERT(vkMapMemory(device, sceneMem, 0, sizeof(GpuScene), 0, (void**)&gpuScene));
+    VkBufferDeviceAddressInfo sceneBufAddressInfo{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = sceneBuf};
+    VkDeviceAddress gpScene = vkGetBufferDeviceAddress(device, &sceneBufAddressInfo);
+    ASSERT(gpScene != 0);
+
     for (U32 i = 0; i < SCENE_POINT_COUNT; i++)
     {
         float theta = HashF(i, 0) * 2.0f * 3.14159265f;
@@ -484,10 +483,6 @@ int main()
         gpuScene->pointPositions[i] =
             glm::vec4(r * cosf(theta), z, r * sinf(theta), 0) * (float)SCENE_ORBIT_RADIUS;
     }
-    VkBufferDeviceAddressInfo sceneBufAddressInfo{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = sceneBuf};
-    VkDeviceAddress gpScene = vkGetBufferDeviceAddress(device, &sceneBufAddressInfo);
-    ASSERT(gpScene != 0);
 
     // Pipeline layout
     VkPushConstantRange pushRange{.stageFlags =
@@ -516,33 +511,27 @@ int main()
                                                       VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
 
     // Render loop
-    U32 frameIndex = 0;
     U32 imageIndex = 0;
     bool quit = false;
     bool updateSwapchain = false;
     while (!quit)
     {
-        VK_ASSERT(vkWaitForFences(device, 1, &fences[frameIndex], VK_TRUE, UINT64_MAX));
-        VK_ASSERT(vkResetFences(device, 1, &fences[frameIndex]));
+        VK_ASSERT(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX));
+        VK_ASSERT(vkResetFences(device, 1, &fence));
 
-        VkResult acquireResult = vkAcquireNextImageKHR(device,
-                                                       swapchain,
-                                                       UINT64_MAX,
-                                                       presentSemaphores[frameIndex],
-                                                       VK_NULL_HANDLE,
-                                                       &imageIndex);
+        VkResult acquireResult = vkAcquireNextImageKHR(
+            device, swapchain, UINT64_MAX, presentSemaphore, VK_NULL_HANDLE, &imageIndex);
         if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR)
             updateSwapchain = true;
         else
             VK_ASSERT(acquireResult);
 
-        VkCommandBuffer cb = commandBuffers[frameIndex];
         VK_ASSERT(vkResetCommandBuffer(cb, 0));
         VkCommandBufferBeginInfo cbBI{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
                                       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
         VK_ASSERT(vkBeginCommandBuffer(cb, &cbBI));
 
-        VkImageMemoryBarrier2 barriers[3]{
+        VkImageMemoryBarrier2 barriers[] = {
             {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
              .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
              .srcAccessMask = 0,
@@ -579,7 +568,7 @@ int main()
              .subresourceRange{
                  .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT, .levelCount = 1, .layerCount = 1}}};
         VkDependencyInfo depInfo{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                                 .imageMemoryBarrierCount = 3,
+                                 .imageMemoryBarrierCount = ARRAY_COUNT(barriers),
                                  .pImageMemoryBarriers = barriers};
         vkCmdPipelineBarrier2(cb, &depInfo);
 
@@ -680,15 +669,13 @@ int main()
         VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo submitInfo{.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                                 .waitSemaphoreCount = 1,
-                                .pWaitSemaphores = &presentSemaphores[frameIndex],
+                                .pWaitSemaphores = &presentSemaphore,
                                 .pWaitDstStageMask = &waitStage,
                                 .commandBufferCount = 1,
                                 .pCommandBuffers = &cb,
                                 .signalSemaphoreCount = 1,
                                 .pSignalSemaphores = &renderSemaphores[imageIndex]};
-        VK_ASSERT(vkQueueSubmit(queue, 1, &submitInfo, fences[frameIndex]));
-
-        frameIndex = (frameIndex + 1) % kMaxFramesInFlight;
+        VK_ASSERT(vkQueueSubmit(queue, 1, &submitInfo, fence));
 
         VkPresentInfoKHR presentInfo{.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                                      .waitSemaphoreCount = 1,
@@ -762,11 +749,8 @@ int main()
     vkDestroyPipeline(device, globePipeline, nullptr);
     vkDestroyPipeline(device, pointPipeline, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
-    for (U32 i = 0; i < kMaxFramesInFlight; i++)
-    {
-        vkDestroyFence(device, fences[i], nullptr);
-        vkDestroySemaphore(device, presentSemaphores[i], nullptr);
-    }
+    vkDestroyFence(device, fence, nullptr);
+    vkDestroySemaphore(device, presentSemaphore, nullptr);
     for (U32 i = 0; i < imageCount; i++)
     {
         vkDestroySemaphore(device, renderSemaphores[i], nullptr);
