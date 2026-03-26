@@ -4,12 +4,12 @@
 #define VOLK_IMPLEMENTATION
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
+#include <cstring>
 #include <math.h>
 #include <volk.h>
-#include <vulkan/vulkan.h>
 
 static constexpr U32 kMaxNumSwapchainImages = 2;
-static constexpr VkSampleCountFlagBits kMsaaSamples = VK_SAMPLE_COUNT_32_BIT;
+static constexpr VkSampleCountFlagBits kMsaaSamples = VK_SAMPLE_COUNT_4_BIT;
 constexpr VkFormat kImageFormat = VK_FORMAT_B8G8R8A8_SRGB;
 constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
 
@@ -332,20 +332,67 @@ VkPipeline App::CreateGraphicsPipeline(const char* shaderName, VkPrimitiveTopolo
 void App::Init()
 {
     ASSERT(SDL_Init(SDL_INIT_VIDEO));
-    ASSERT(SDL_Vulkan_LoadLibrary(nullptr));
-    volkInitialize();
+    {
+        constexpr const char* kVulkanLibs[] = {
+            nullptr,
+#ifdef __APPLE__
+            "libMoltenVK.dylib",
+            "/opt/homebrew/lib/libMoltenVK.dylib",
+            "/usr/local/lib/libMoltenVK.dylib",
+#endif
+        };
+        bool loaded = false;
+        for (const char* const lib : kVulkanLibs)
+            if ((loaded = SDL_Vulkan_LoadLibrary(lib)))
+                break;
+        if (!loaded)
+            LOG_FATAL("Failed to load Vulkan: %s", SDL_GetError());
+    }
+    volkInitializeCustom((PFN_vkGetInstanceProcAddr)SDL_Vulkan_GetVkGetInstanceProcAddr());
 
     VkApplicationInfo appInfo{.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
                               .pApplicationName = "Triangle",
                               .apiVersion = VK_API_VERSION_1_3};
+    U32 availableExtensionsCount;
+    VkExtensionProperties availableExtensions[32];
+    vkEnumerateInstanceExtensionProperties(nullptr, &availableExtensionsCount, nullptr);
+    ASSERT(availableExtensionsCount <= ARRAY_COUNT(availableExtensions));
+    vkEnumerateInstanceExtensionProperties(nullptr, &availableExtensionsCount, availableExtensions);
+
     U32 instanceExtensionsCount;
-    char const* const* instanceExtensions{
-        SDL_Vulkan_GetInstanceExtensions(&instanceExtensionsCount)};
+    char const* const* instanceExtensions =
+        SDL_Vulkan_GetInstanceExtensions(&instanceExtensionsCount);
+    const char* filteredExtensions[32];
+    U32 filteredExtensionsCount = 0;
+    for (U32 i = 0; i < instanceExtensionsCount; i++)
+    {
+        bool available = false;
+        for (U32 j = 0; j < availableExtensionsCount; j++)
+        {
+            if (strcmp(instanceExtensions[i], availableExtensions[j].extensionName) == 0)
+            {
+                ASSERT(filteredExtensionsCount < ARRAY_COUNT(filteredExtensions));
+                filteredExtensions[filteredExtensionsCount++] = instanceExtensions[i];
+                available = true;
+                break;
+            }
+        }
+
+        if (!available)
+        {
+            LOG_INFO("SDL instance extension unavailable: %s", instanceExtensions[i]);
+        }
+    }
+    LOG_INFO("Loaded extensions:");
+    for (U32 i = 0; i < filteredExtensionsCount; ++i)
+    {
+        LOG_INFO("    %s", filteredExtensions[i]);
+    }
     VkInstanceCreateInfo instanceCI{
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &appInfo,
-        .enabledExtensionCount = instanceExtensionsCount,
-        .ppEnabledExtensionNames = instanceExtensions,
+        .enabledExtensionCount = filteredExtensionsCount,
+        .ppEnabledExtensionNames = filteredExtensions,
     };
     VK_ASSERT(vkCreateInstance(&instanceCI, nullptr, &instance));
     volkLoadInstance(instance);
@@ -502,7 +549,7 @@ void App::Run()
 
         VkResult acquireResult = vkAcquireNextImageKHR(
             device, swapchain, UINT64_MAX, presentSemaphore, VK_NULL_HANDLE, &imageIndex);
-        if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR)
+        if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR || acquireResult == VK_SUBOPTIMAL_KHR)
             updateSwapchain = true;
         else
             VK_ASSERT(acquireResult);

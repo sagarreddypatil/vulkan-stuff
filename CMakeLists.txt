@@ -16,7 +16,7 @@ project(triangle CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-add_compile_options(-O3 -march=native)
+add_compile_options(-O3 -march=native -g)
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options(-Wframe-larger-than=1048576 -Werror=frame-larger-than=1048576)
@@ -55,6 +55,7 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(volk)
+target_link_libraries(volk PUBLIC Vulkan::Headers)
 
 # ── Shader compilation ───────────────────────────────────────────────────────
 set(SLANGC "" CACHE FILEPATH "Path to the slangc executable")
@@ -144,19 +145,3 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 add_dependencies(${PROJECT_NAME} shaders)
-
-# ── macOS: MoltenVK ───────────────────────────────────────────────────────────
-if(APPLE)
-    # LunarG SDK takes priority, fall back to Homebrew
-    if(DEFINED ENV{VULKAN_SDK})
-        target_link_libraries(${PROJECT_NAME} PRIVATE
-            "$ENV{VULKAN_SDK}/lib/libMoltenVK.dylib"
-        )
-    else()
-        # arm64 Homebrew prefix; Intel is /usr/local
-        set(HOMEBREW_PREFIX "/opt/homebrew" CACHE PATH "Homebrew prefix")
-        target_link_libraries(${PROJECT_NAME} PRIVATE
-            "${HOMEBREW_PREFIX}/lib/libMoltenVK.dylib"
-        )
-    endif()
-endif()

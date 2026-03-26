@@ -8,4 +8,4 @@ cmake -G Ninja -S . -B build \
     -DSLANGC="${SLANGC:-/opt/shader-slang-bin/bin/slangc}"
 cmake --build build
 cd build
-mangohud ./triangle
+./triangle
