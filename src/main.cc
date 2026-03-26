@@ -1,3 +1,4 @@
+#include "shaders.h"
 #include "shared.h"
 #include "util.h"
 
@@ -115,7 +116,10 @@ struct App
                      VkImageView& view);
     void DestroyImage(VkImage img, VkDeviceMemory mem, VkImageView view);
     void RefreshSwapchain();
-    void CreateShaderPair(const char* shaderName, VkShaderEXT shaders[2]);
+    void CreateVertFragPair(const U32* const (&pSpvs)[2],
+                            const U64 (&sizes)[2],
+                            VkShaderEXT (&shaders)[2]);
+
     void Init();
     void Run();
     void Shutdown();
@@ -232,49 +236,33 @@ void App::RefreshSwapchain()
     }
 }
 
-void App::CreateShaderPair(const char* shaderName, VkShaderEXT shaders[2])
+void App::CreateVertFragPair(const U32* const (&pSpvs)[2],
+                             const U64 (&sizes)[2],
+                             VkShaderEXT (&shaders)[2])
 {
     VkPushConstantRange pushRange{.stageFlags =
                                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                   .offset = 0,
                                   .size = sizeof(PushConstants)};
-    const char* stages[] = {"vert", "frag"};
+
     VkShaderStageFlagBits stageFlags[] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
     VkShaderStageFlags nextStage[] = {VK_SHADER_STAGE_FRAGMENT_BIT, 0};
 
     VkShaderCreateInfoEXT createInfos[2]{};
-    U32* spirvData[2]{};
-
     for (int i = 0; i < 2; i++)
     {
-        char path[256];
-        int pathLen = snprintf(path, sizeof(path), "shaders/%s.%s.spv", shaderName, stages[i]);
-        ASSERT(pathLen > 0 && pathLen < I32(sizeof(path)));
-        FILE* f = fopen(path, "rb");
-        if (!f)
-            LOG_FATAL("Failed to open %s", path);
-        fseek(f, 0, SEEK_END);
-        U64 size = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        ASSERT((size % sizeof(U32)) == 0);
-        spirvData[i] = new U32[size / sizeof(U32)];
-        ASSERT(fread(spirvData[i], 1, size, f) == size);
-        fclose(f);
-
         createInfos[i] = {.sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
                           .stage = stageFlags[i],
                           .nextStage = nextStage[i],
                           .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
-                          .codeSize = size,
-                          .pCode = spirvData[i],
+                          .codeSize = sizes[i],
+                          .pCode = pSpvs[i],
                           .pName = "main",
                           .pushConstantRangeCount = 1,
                           .pPushConstantRanges = &pushRange};
     }
 
     VK_ASSERT(vkCreateShadersEXT(device, 2, createInfos, nullptr, shaders));
-    delete[] spirvData[0];
-    delete[] spirvData[1];
 }
 
 void App::Init()
@@ -337,8 +325,8 @@ void App::Init()
     }
     VkInstanceCreateInfo instanceCI{
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
-        .pApplicationInfo = &appInfo,
         .flags = instanceFlags,
+        .pApplicationInfo = &appInfo,
         .enabledExtensionCount = filteredExtensionsCount,
         .ppEnabledExtensionNames = filteredExtensions,
     };
@@ -488,8 +476,12 @@ void App::Init()
                                                 .pushConstantRangeCount = 1,
                                                 .pPushConstantRanges = &pushRange};
     VK_ASSERT(vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout));
-    CreateShaderPair("globe", globeShaders);
-    CreateShaderPair("point", pointShaders);
+    CreateVertFragPair({globe_vert_spv, globe_frag_spv},
+                       {globe_vert_spv_sizeInBytes, globe_frag_spv_sizeInBytes},
+                       globeShaders);
+    CreateVertFragPair({point_vert_spv, point_frag_spv},
+                       {point_vert_spv_sizeInBytes, point_frag_spv_sizeInBytes},
+                       pointShaders);
 }
 
 void App::Run()
@@ -608,12 +600,12 @@ void App::Run()
                                      float4(0.0f, -1.0f / halfTan, 0.0f, 0.0f),
                                      float4(0.0f, 0.0f, f / (n - f), -1.0f),
                                      float4(0.0f, 0.0f, n * f / (n - f), 0.0f));
-            PushConstants pc{.screenToWorld = float4x4(float4(right * (aspect * halfTan), 0.0f),
-                                                       float4(up * -halfTan, 0.0f),
-                                                       float4(fwd, 0.0f),
-                                                       float4(pos, 1.0f)),
-                             .worldToScreen = Mul(proj, view),
-                             .gpScene = gpScene};
+            gpuScene->screenToWorld = float4x4(float4(right * (aspect * halfTan), 0.0f),
+                                               float4(up * -halfTan, 0.0f),
+                                               float4(fwd, 0.0f),
+                                               float4(pos, 1.0f));
+            gpuScene->worldToScreen = Mul(proj, view);
+            PushConstants pc{.gpScene = gpScene};
             vkCmdPushConstants(cb,
                                pipelineLayout,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -656,15 +648,15 @@ void App::Run()
         VkShaderEXT nullShaders[] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
         vkCmdBindShadersEXT(cb, 3, unusedStages, nullShaders);
 
-        VkShaderStageFlagBits gfxStages[] = {VK_SHADER_STAGE_VERTEX_BIT,
-                                             VK_SHADER_STAGE_FRAGMENT_BIT};
+        VkShaderStageFlagBits vertFragStages[] = {VK_SHADER_STAGE_VERTEX_BIT,
+                                                  VK_SHADER_STAGE_FRAGMENT_BIT};
 
         vkCmdSetPrimitiveTopology(cb, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-        vkCmdBindShadersEXT(cb, 2, gfxStages, globeShaders);
+        vkCmdBindShadersEXT(cb, 2, vertFragStages, globeShaders);
         vkCmdDraw(cb, 3, 1, 0, 0);
 
         vkCmdSetPrimitiveTopology(cb, VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
-        vkCmdBindShadersEXT(cb, 2, gfxStages, pointShaders);
+        vkCmdBindShadersEXT(cb, 2, vertFragStages, pointShaders);
         vkCmdDraw(cb, kScenePointCount, 1, 0, 0);
 
         vkCmdEndRendering(cb);

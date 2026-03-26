@@ -15,7 +15,7 @@ struct GlobeFragmentOutput
 };
 
 [shader("vertex")]
-GlobeVertexOutput vertexMain(uint vertexId : SV_VertexID)
+GlobeVertexOutput vertexMain(uint vertexId: SV_VertexID)
 {
     float2 positions[3] = {
         float2(-1.0, -1.0),
@@ -32,12 +32,13 @@ GlobeVertexOutput vertexMain(uint vertexId : SV_VertexID)
 }
 
 [shader("fragment")]
-GlobeFragmentOutput fragmentMain([[vk::location(0)]] float2 uv : TEXCOORD0,
-                                 uniform PushConstants pc)
+GlobeFragmentOutput fragmentMain([[vk::location(0)]] float2 uv: TEXCOORD0, uniform PushConstants pc)
 {
+    GpuScene* scene = (GpuScene*)pc.gpScene;
+
     float2 ndc = uv * 2.0 - 1.0;
-    float3 ro = mul(pc.screenToWorld, float4(0.0, 0.0, 0.0, 1.0)).xyz;
-    float3 rd = normalize(mul(pc.screenToWorld, float4(ndc.x, ndc.y, 1.0, 0.0)).xyz);
+    float3 ro = mul(scene.screenToWorld, float4(0.0, 0.0, 0.0, 1.0)).xyz;
+    float3 rd = normalize(mul(scene.screenToWorld, float4(ndc.x, ndc.y, 1.0, 0.0)).xyz);
 
     float b = dot(ro, rd);
     float c = dot(ro, ro) - 1.0;
@@ -72,9 +73,10 @@ GlobeFragmentOutput fragmentMain([[vk::location(0)]] float2 uv : TEXCOORD0,
     float grid = max(latLine, lonLine);
     float facing = max(dot(n, -rd), 0.0);
 
-    output.color = float4(lerp(float3(0.05, 0.05, 0.05), float3(0.3, 0.7, 1.0), grid) * facing, 1.0);
+    output.color =
+        float4(lerp(float3(0.05, 0.05, 0.05), float3(0.3, 0.7, 1.0), grid) * facing, 1.0);
 
-    float4 clipHit = mul(pc.worldToScreen, float4(hit, 1.0));
+    float4 clipHit = mul(scene.worldToScreen, float4(hit, 1.0));
     output.depth = clipHit.z / clipHit.w;
     return output;
 }

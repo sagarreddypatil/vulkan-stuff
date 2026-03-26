@@ -97,9 +97,10 @@ if(NOT SLANGC)
 endif()
 
 set(SHADER_SOURCE_DIR ${CMAKE_SOURCE_DIR}/shaders)
-set(SHADER_BINARY_DIR ${CMAKE_BINARY_DIR}/shaders)
+set(GENERATED_DIR ${CMAKE_BINARY_DIR}/generated)
+set(SHADER_BINARY_DIR ${GENERATED_DIR}/shaders)
 
-function(add_slang_shader_module SHADER_NAME ENTRY_POINT SHADER_STAGE OUTPUT_NAME)
+function(add_slang_shader_module SHADER_NAME ENTRY_POINT SHADER_STAGE OUTPUT_NAME EMBED_NAME)
     set(SHADER ${SHADER_SOURCE_DIR}/${SHADER_NAME}.slang)
     set(SHADER_OUTPUT ${SHADER_BINARY_DIR}/${OUTPUT_NAME})
     add_custom_command(
@@ -108,27 +109,30 @@ function(add_slang_shader_module SHADER_NAME ENTRY_POINT SHADER_STAGE OUTPUT_NAM
         COMMAND ${SLANGC}
                 -lang slang
                 -target spirv
-                -profile glsl_450
+                -profile spirv_1_5
                 -entry ${ENTRY_POINT}
                 -stage ${SHADER_STAGE}
-                # Match the existing GLM/GLSL-side push constant matrix layout.
-                -matrix-layout-column-major
                 -I ${SHADER_SOURCE_DIR}
+                -source-embed-style u32
+                -source-embed-name ${EMBED_NAME}
                 ${SHADER}
                 -o ${SHADER_OUTPUT}
         DEPENDS ${SHADER} ${SHADER_SOURCE_DIR}/shared.h ${CMAKE_SOURCE_DIR}/src/util.h
         COMMENT "Compiling Slang shader ${OUTPUT_NAME}"
     )
-    list(APPEND SHADER_BINARIES ${SHADER_OUTPUT})
-    set(SHADER_BINARIES ${SHADER_BINARIES} PARENT_SCOPE)
+    list(APPEND SHADER_HEADERS ${SHADER_OUTPUT})
+    set(SHADER_HEADERS ${SHADER_HEADERS} PARENT_SCOPE)
 endfunction()
 
-add_slang_shader_module(globe vertexMain   vertex   globe.vert.spv)
-add_slang_shader_module(globe fragmentMain fragment globe.frag.spv)
-add_slang_shader_module(point vertexMain   vertex   point.vert.spv)
-add_slang_shader_module(point fragmentMain fragment point.frag.spv)
+add_slang_shader_module(globe vertexMain   vertex   globe.vert.h globe_vert_spv)
+add_slang_shader_module(globe fragmentMain fragment globe.frag.h globe_frag_spv)
+add_slang_shader_module(point vertexMain   vertex   point.vert.h point_vert_spv)
+add_slang_shader_module(point fragmentMain fragment point.frag.h point_frag_spv)
 
-add_custom_target(shaders ALL DEPENDS ${SHADER_BINARIES})
+add_custom_target(shaders ALL DEPENDS ${SHADER_HEADERS})
+
+set(SHADERS_HEADER ${GENERATED_DIR}/shaders.h)
+configure_file(${CMAKE_SOURCE_DIR}/cmake/shaders.h.in ${SHADERS_HEADER} COPYONLY)
 
 # ── executable ────────────────────────────────────────────────────────────────
 add_executable(${PROJECT_NAME} src/main.cc src/util.cc)
@@ -142,6 +146,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/shaders
     ${CMAKE_SOURCE_DIR}/src
+    ${GENERATED_DIR}
 )
 
 add_dependencies(${PROJECT_NAME} shaders)

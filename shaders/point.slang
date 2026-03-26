@@ -14,18 +14,18 @@ struct PointFragmentOutput
 };
 
 [shader("vertex")]
-PointVertexOutput vertexMain(uint vertexId : SV_VertexID, uniform PushConstants pc)
+PointVertexOutput vertexMain(uint vertexId: SV_VertexID, uniform PushConstants pc)
 {
     GpuScene* scene = (GpuScene*)pc.gpScene;
 
     PointVertexOutput output;
-    output.position = mul(pc.worldToScreen, float4((*scene).pointPositions[vertexId].xyz, 1.0));
+    output.position = mul(scene.worldToScreen, float4(scene.pointPositions[vertexId].xyz, 1.0));
     output.pointSize = 5.0;
     return output;
 }
 
 [shader("fragment")]
-PointFragmentOutput fragmentMain(float4 position : SV_Position, float2 pointCoord : SV_PointCoord)
+PointFragmentOutput fragmentMain(float4 position: SV_Position, float2 pointCoord: SV_PointCoord)
 {
     float2 d = pointCoord * 2.0 - 1.0;
     if (dot(d, d) > 1.0)

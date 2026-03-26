@@ -17,13 +17,13 @@ static const float kSceneOrbitRadius = kSceneOrbitRadiusValue;
 
 struct PushConstants
 {
-    float4x4 screenToWorld;
-    float4x4 worldToScreen;
     U64 gpScene;
 };
 
 struct GpuScene
 {
+    float4x4 screenToWorld;
+    float4x4 worldToScreen;
     float4 pointPositions[kScenePointCount];
 };
 

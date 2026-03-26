@@ -1,0 +1,9 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+#include "shaders/globe.vert.h"
+#include "shaders/globe.frag.h"
+#include "shaders/point.vert.h"
+#include "shaders/point.frag.h"
