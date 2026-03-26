@@ -26,7 +26,7 @@ constexpr VkFormat kDepthFormat = VK_FORMAT_D32_SFLOAT;
     {                                                                                              \
         VkResult _r = (line);                                                                      \
         if (_r != VK_SUCCESS)                                                                      \
-            LOG_FATAL("VK_ASSERT FAIL: %s|res=%u", #line, _r);                                     \
+            LOG_FATAL("VK_ASSERT FAIL: %s|res=%d", #line, _r);                                     \
     } while (0)
 
 static U32 FindMemoryType(VkPhysicalDevice physDev, U32 typeFilter, VkMemoryPropertyFlags props)
@@ -96,8 +96,8 @@ struct App
     VkDeviceAddress gpScene;
 
     VkPipelineLayout pipelineLayout;
-    VkPipeline globePipeline;
-    VkPipeline pointPipeline;
+    VkShaderEXT globeShaders[2];
+    VkShaderEXT pointShaders[2];
 
     float camYaw = 0.0f;
     float camPitch = 0.3f;
@@ -115,8 +115,7 @@ struct App
                      VkImageView& view);
     void DestroyImage(VkImage img, VkDeviceMemory mem, VkImageView view);
     void RefreshSwapchain();
-    VkShaderModule LoadShaderModule(const char* shaderName, const char* stage);
-    VkPipeline CreateGraphicsPipeline(const char* shaderName, VkPrimitiveTopology topology);
+    void CreateShaderPair(const char* shaderName, VkShaderEXT shaders[2]);
     void Init();
     void Run();
     void Shutdown();
@@ -233,100 +232,49 @@ void App::RefreshSwapchain()
     }
 }
 
-VkShaderModule App::LoadShaderModule(const char* shaderName, const char* stage)
+void App::CreateShaderPair(const char* shaderName, VkShaderEXT shaders[2])
 {
-    char path[256];
-    int pathLen = snprintf(path, sizeof(path), "shaders/%s.%s.spv", shaderName, stage);
-    ASSERT(pathLen > 0 && pathLen < I32(sizeof(path)));
-    FILE* f = fopen(path, "rb");
-    if (!f)
-        LOG_FATAL("Failed to open %s", path);
-    ON_SCOPE_EXIT(fclose(f));
-    fseek(f, 0, SEEK_END);
-    U64 size = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    ASSERT((size % sizeof(U32)) == 0);
-    U32* spirv = new U32[size / sizeof(U32)];
-    ASSERT(spirv != nullptr);
-    ON_SCOPE_EXIT(delete[] spirv);
-    ASSERT(fread(spirv, 1, size, f) == size);
-    VkShaderModuleCreateInfo ci{
-        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = size, .pCode = spirv};
-    VkShaderModule mod;
-    VK_ASSERT(vkCreateShaderModule(device, &ci, nullptr, &mod));
-    return mod;
-}
+    VkPushConstantRange pushRange{.stageFlags =
+                                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                  .offset = 0,
+                                  .size = sizeof(PushConstants)};
+    const char* stages[] = {"vert", "frag"};
+    VkShaderStageFlagBits stageFlags[] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT};
+    VkShaderStageFlags nextStage[] = {VK_SHADER_STAGE_FRAGMENT_BIT, 0};
 
-VkPipeline App::CreateGraphicsPipeline(const char* shaderName, VkPrimitiveTopology topology)
-{
-    VkShaderModule vertex = LoadShaderModule(shaderName, "vert");
-    ON_SCOPE_EXIT(vkDestroyShaderModule(device, vertex, nullptr));
-    VkShaderModule fragment = LoadShaderModule(shaderName, "frag");
-    ON_SCOPE_EXIT(vkDestroyShaderModule(device, fragment, nullptr));
-    VkPipelineShaderStageCreateInfo shaderStages[2]{
-        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-         .stage = VK_SHADER_STAGE_VERTEX_BIT,
-         .module = vertex,
-         .pName = "main"},
-        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-         .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-         .module = fragment,
-         .pName = "main"},
-    };
-    VkPipelineVertexInputStateCreateInfo vertexInputState{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    VkPipelineInputAssemblyStateCreateInfo inputAssemblyState{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = topology};
-    VkDynamicState dynamicStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
-    VkPipelineDynamicStateCreateInfo dynamicState{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = ARRAY_COUNT(dynamicStates),
-        .pDynamicStates = dynamicStates};
-    VkPipelineViewportStateCreateInfo viewportState{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-        .viewportCount = 1,
-        .scissorCount = 1};
-    VkPipelineRasterizationStateCreateInfo rasterizationState{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .lineWidth = 1.0f};
-    VkPipelineMultisampleStateCreateInfo multisampleState{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = kMsaaSamples};
-    VkPipelineColorBlendAttachmentState blendAttachment{
-        .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
-                          | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT};
-    VkPipelineColorBlendStateCreateInfo colorBlendState{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &blendAttachment};
-    VkPipelineDepthStencilStateCreateInfo depthStencilState{
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-        .depthTestEnable = VK_TRUE,
-        .depthWriteEnable = VK_TRUE,
-        .depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL};
-    VkFormat colorFormat = kImageFormat;
-    VkPipelineRenderingCreateInfo renderingCI{.sType =
-                                                  VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-                                              .colorAttachmentCount = 1,
-                                              .pColorAttachmentFormats = &colorFormat,
-                                              .depthAttachmentFormat = kDepthFormat};
-    VkGraphicsPipelineCreateInfo pipelineCI{.sType =
-                                                VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-                                            .pNext = &renderingCI,
-                                            .stageCount = ARRAY_COUNT(shaderStages),
-                                            .pStages = shaderStages,
-                                            .pVertexInputState = &vertexInputState,
-                                            .pInputAssemblyState = &inputAssemblyState,
-                                            .pViewportState = &viewportState,
-                                            .pRasterizationState = &rasterizationState,
-                                            .pMultisampleState = &multisampleState,
-                                            .pDepthStencilState = &depthStencilState,
-                                            .pColorBlendState = &colorBlendState,
-                                            .pDynamicState = &dynamicState,
-                                            .layout = pipelineLayout};
-    VkPipeline pipeline;
-    VK_ASSERT(
-        vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipelineCI, nullptr, &pipeline));
-    return pipeline;
+    VkShaderCreateInfoEXT createInfos[2]{};
+    U32* spirvData[2]{};
+
+    for (int i = 0; i < 2; i++)
+    {
+        char path[256];
+        int pathLen = snprintf(path, sizeof(path), "shaders/%s.%s.spv", shaderName, stages[i]);
+        ASSERT(pathLen > 0 && pathLen < I32(sizeof(path)));
+        FILE* f = fopen(path, "rb");
+        if (!f)
+            LOG_FATAL("Failed to open %s", path);
+        fseek(f, 0, SEEK_END);
+        U64 size = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        ASSERT((size % sizeof(U32)) == 0);
+        spirvData[i] = new U32[size / sizeof(U32)];
+        ASSERT(fread(spirvData[i], 1, size, f) == size);
+        fclose(f);
+
+        createInfos[i] = {.sType = VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT,
+                          .stage = stageFlags[i],
+                          .nextStage = nextStage[i],
+                          .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT,
+                          .codeSize = size,
+                          .pCode = spirvData[i],
+                          .pName = "main",
+                          .pushConstantRangeCount = 1,
+                          .pPushConstantRanges = &pushRange};
+    }
+
+    VK_ASSERT(vkCreateShadersEXT(device, 2, createInfos, nullptr, shaders));
+    delete[] spirvData[0];
+    delete[] spirvData[1];
 }
 
 void App::Init()
@@ -336,9 +284,7 @@ void App::Init()
         constexpr const char* kVulkanLibs[] = {
             nullptr,
 #ifdef __APPLE__
-            "libMoltenVK.dylib",
-            "/opt/homebrew/lib/libMoltenVK.dylib",
-            "/usr/local/lib/libMoltenVK.dylib",
+            "/usr/local/lib/libvulkan.dylib",
 #endif
         };
         bool loaded = false;
@@ -369,7 +315,7 @@ void App::Init()
         bool available = false;
         for (U32 j = 0; j < availableExtensionsCount; j++)
         {
-            if (strcmp(instanceExtensions[i], availableExtensions[j].extensionName) == 0)
+            if (!__builtin_strcmp(instanceExtensions[i], availableExtensions[j].extensionName))
             {
                 ASSERT(filteredExtensionsCount < ARRAY_COUNT(filteredExtensions));
                 filteredExtensions[filteredExtensionsCount++] = instanceExtensions[i];
@@ -383,14 +329,16 @@ void App::Init()
             LOG_INFO("SDL instance extension unavailable: %s", instanceExtensions[i]);
         }
     }
-    LOG_INFO("Loaded extensions:");
+    VkInstanceCreateFlags instanceFlags = 0;
     for (U32 i = 0; i < filteredExtensionsCount; ++i)
     {
-        LOG_INFO("    %s", filteredExtensions[i]);
+        if (!__builtin_strcmp(filteredExtensions[i], VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME))
+            instanceFlags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
     }
     VkInstanceCreateInfo instanceCI{
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &appInfo,
+        .flags = instanceFlags,
         .enabledExtensionCount = filteredExtensionsCount,
         .ppEnabledExtensionNames = filteredExtensions,
     };
@@ -432,15 +380,22 @@ void App::Init()
                                     .queueFamilyIndex = queueFamily,
                                     .queueCount = 1,
                                     .pQueuePriorities = &qfPrios};
+    VkPhysicalDeviceShaderObjectFeaturesEXT shaderObjectFeatures{
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT,
+        .shaderObject = VK_TRUE};
     VkPhysicalDeviceVulkan12Features enabledVk12Features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+        .pNext = &shaderObjectFeatures,
         .bufferDeviceAddress = true};
     VkPhysicalDeviceVulkan13Features enabledVk13Features{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
         .pNext = &enabledVk12Features,
         .synchronization2 = true,
         .dynamicRendering = true};
-    const char* deviceExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+
+    const char* deviceExtensions[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+                                      VK_EXT_SHADER_OBJECT_EXTENSION_NAME,
+                                      "VK_KHR_portability_subset"};
     VkDeviceCreateInfo deviceCI{.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                 .pNext = &enabledVk13Features,
                                 .queueCreateInfoCount = 1,
@@ -533,8 +488,8 @@ void App::Init()
                                                 .pushConstantRangeCount = 1,
                                                 .pPushConstantRanges = &pushRange};
     VK_ASSERT(vkCreatePipelineLayout(device, &pipelineLayoutCI, nullptr, &pipelineLayout));
-    globePipeline = CreateGraphicsPipeline("globe", VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
-    pointPipeline = CreateGraphicsPipeline("point", VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+    CreateShaderPair("globe", globeShaders);
+    CreateShaderPair("point", pointShaders);
 }
 
 void App::Run()
@@ -631,8 +586,8 @@ void App::Run()
                       .minDepth = 0.0f,
                       .maxDepth = 1.0f};
         VkRect2D scissor{.extent{.width = windowSizeX, .height = windowSizeY}};
-        vkCmdSetViewport(cb, 0, 1, &vp);
-        vkCmdSetScissor(cb, 0, 1, &scissor);
+        vkCmdSetViewportWithCount(cb, 1, &vp);
+        vkCmdSetScissorWithCount(cb, 1, &scissor);
 
         {
             float cy = cosf(camYaw), sy = sinf(camYaw);
@@ -667,10 +622,49 @@ void App::Run()
                                &pc);
         }
 
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, globePipeline);
+        // Dynamic state for shader objects
+        vkCmdSetRasterizerDiscardEnable(cb, VK_FALSE);
+        vkCmdSetPolygonModeEXT(cb, VK_POLYGON_MODE_FILL);
+        vkCmdSetCullMode(cb, VK_CULL_MODE_NONE);
+        vkCmdSetFrontFace(cb, VK_FRONT_FACE_COUNTER_CLOCKWISE);
+        vkCmdSetDepthBiasEnable(cb, VK_FALSE);
+        vkCmdSetDepthTestEnable(cb, VK_TRUE);
+        vkCmdSetDepthWriteEnable(cb, VK_TRUE);
+        vkCmdSetDepthCompareOp(cb, VK_COMPARE_OP_LESS_OR_EQUAL);
+        vkCmdSetDepthBoundsTestEnable(cb, VK_FALSE);
+        vkCmdSetStencilTestEnable(cb, VK_FALSE);
+        vkCmdSetPrimitiveRestartEnable(cb, VK_FALSE);
+        vkCmdSetRasterizationSamplesEXT(cb, kMsaaSamples);
+        VkSampleMask sampleMask = 0xFFFFFFFF;
+        vkCmdSetSampleMaskEXT(cb, kMsaaSamples, &sampleMask);
+        vkCmdSetAlphaToCoverageEnableEXT(cb, VK_FALSE);
+        VkBool32 blendEnable = VK_FALSE;
+        vkCmdSetColorBlendEnableEXT(cb, 0, 1, &blendEnable);
+        VkColorBlendEquationEXT blendEquation{};
+        vkCmdSetColorBlendEquationEXT(cb, 0, 1, &blendEquation);
+        VkColorComponentFlags colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                                               | VK_COLOR_COMPONENT_B_BIT
+                                               | VK_COLOR_COMPONENT_A_BIT;
+        vkCmdSetColorWriteMaskEXT(cb, 0, 1, &colorWriteMask);
+        vkCmdSetLogicOpEnableEXT(cb, VK_FALSE);
+        vkCmdSetVertexInputEXT(cb, 0, nullptr, 0, nullptr);
+
+        // Unbind unused shader stages
+        VkShaderStageFlagBits unusedStages[] = {VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
+                                                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT,
+                                                VK_SHADER_STAGE_GEOMETRY_BIT};
+        VkShaderEXT nullShaders[] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+        vkCmdBindShadersEXT(cb, 3, unusedStages, nullShaders);
+
+        VkShaderStageFlagBits gfxStages[] = {VK_SHADER_STAGE_VERTEX_BIT,
+                                             VK_SHADER_STAGE_FRAGMENT_BIT};
+
+        vkCmdSetPrimitiveTopology(cb, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        vkCmdBindShadersEXT(cb, 2, gfxStages, globeShaders);
         vkCmdDraw(cb, 3, 1, 0, 0);
 
-        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pointPipeline);
+        vkCmdSetPrimitiveTopology(cb, VK_PRIMITIVE_TOPOLOGY_POINT_LIST);
+        vkCmdBindShadersEXT(cb, 2, gfxStages, pointShaders);
         vkCmdDraw(cb, kScenePointCount, 1, 0, 0);
 
         vkCmdEndRendering(cb);
@@ -763,8 +757,10 @@ void App::Run()
 void App::Shutdown()
 {
     VK_ASSERT(vkDeviceWaitIdle(device));
-    vkDestroyPipeline(device, globePipeline, nullptr);
-    vkDestroyPipeline(device, pointPipeline, nullptr);
+    for (auto s : globeShaders)
+        vkDestroyShaderEXT(device, s, nullptr);
+    for (auto s : pointShaders)
+        vkDestroyShaderEXT(device, s, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
     vkDestroyFence(device, fence, nullptr);
     vkDestroySemaphore(device, presentSemaphore, nullptr);

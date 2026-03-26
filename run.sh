@@ -8,4 +8,6 @@ cmake -G Ninja -S . -B build \
     -DSLANGC="${SLANGC:-/opt/shader-slang-bin/bin/slangc}"
 cmake --build build
 cd build
+
+export VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_shader_object
 ./triangle
